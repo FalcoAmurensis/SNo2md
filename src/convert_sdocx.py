@@ -278,7 +278,7 @@ def overlay(writer, pg, raw, media, files, width_scale, counters):
     return out
 
 
-def convert(source, destination, width_scale=1.0):
+def convert(source, destination, width_scale=0.5):
     if destination.exists(): raise FileExistsError(f'output already exists: {destination}')
     if source.is_dir() and destination.resolve().is_relative_to(source.resolve()):
         raise ValueError('output must be outside the input folder')
@@ -354,7 +354,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source',type=Path,help='one .sdocx or unpacked note root')
     parser.add_argument('output',type=Path,help='new .pdf path; never overwritten')
-    parser.add_argument('--width-scale',type=float,default=1.0)
+    parser.add_argument('--width-scale',type=float,default=0.5, help='Stroke and shape width multiplier (default: 0.5)')
     args = parser.parse_args()
     if not math.isfinite(args.width_scale) or args.width_scale <= 0:
         parser.error('--width-scale must be finite and positive')
