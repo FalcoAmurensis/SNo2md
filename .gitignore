@@ -1,0 +1,10 @@
+# Private input and generated research artifacts
+/data/
+/docs/data/
+/research/output/
+/research/upstream/
+/research/.venv/
+/research/*.log
+__pycache__/
+
+/.venv/

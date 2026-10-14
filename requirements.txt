@@ -1,0 +1,2 @@
+# Production PDF composition; no PyMuPDF, Pillow, or external SDOCX parser.
+pypdf==6.20.1
