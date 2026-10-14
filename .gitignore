@@ -17,3 +17,6 @@
 
 #credentials
 .env 
+
+
+!/README.mdd
