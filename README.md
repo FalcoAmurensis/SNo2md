@@ -1,6 +1,6 @@
-# SNo2PDF - Convert Samsung note to PDF 
+# SNo2md - Convert Samsung note to markdown for LLM 
 
-삼성노트의 **SDOCX 파일 또는 압축 해제된 노트 폴더**를 읽어 필기·도형·삽입 이미지를 포함한 PDF로 변환한다. 
+삼성노트의 **SDOCX 파일 또는 압축 해제된 노트 폴더**를 읽어 필기·도형·삽입 이미지를 포함한 PDF 및 마크다운으로 변환한다. 
 
 현재는 **노트 하나 전체를 PDF 변환하는 CLI**까지 구현했다. 최종 목표는 Windows의 삼성노트 백업을 감시하고 Obsidian Vault의 PDF를 자동 갱신하는 것이다.
 (본래 삼성노트->옵시디언 자동 handoff 파이프라인으로 설계했으나, 확장의 여지를 남기기 위해 일단은 간단한 버전만)

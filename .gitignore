@@ -10,6 +10,9 @@
 !/src/research/requirements.txt
 !/src/research/upstream_versions.json
 !/src/third_party/pypdf-LICENSE.txt
+# Allow attachments
+!/attachments/
+!/attachments/*
 
 # Generated Python files are never source.
 **/__pycache__/
