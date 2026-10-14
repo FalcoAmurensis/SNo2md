@@ -10,10 +10,20 @@ import struct
 import traceback
 import zipfile
 
-from inspect_samples import write_json, sha256
+from inspect_samples import ROOT, write_json, sha256
 import pymupdf as fitz
 from kaitaistruct import KaitaiStream, BytesIO
 from note_pipeline.input.samsung_notes.generated.samsung_note import SamsungNote
+
+
+def recorded_path(value):
+    path = Path(value)
+    for old, new in (("research/output", "private/output"), ("docs/data", "private/samples")):
+        try:
+            return ROOT / new / path.relative_to(ROOT / old)
+        except ValueError:
+            pass
+    return path
 
 
 def load(path):
@@ -78,9 +88,9 @@ def analyze(directory):
     diagnostic["page_order_matches_sidecar"] = [p["file"][:-5] for p in records] == [p["page_id"] for p in sidecars["pageIdInfo.dat"]["entries"]]
     diagnostic["page_uuid_matches_filename"] = all(p["file"][:-5] == p["metadata"]["page_uuid"] for p in records)
     diagnostic["pdf_byte_equal_to_zip_member"] = []
-    with zipfile.ZipFile(summary["input"]) as archive:
+    with zipfile.ZipFile(recorded_path(summary["input"])) as archive:
         for pdf in summary["pdfs"]:
-            path = Path(pdf["path"])
+            path = recorded_path(pdf["path"])
             diagnostic["pdf_byte_equal_to_zip_member"].append({"member": path.relative_to(raw).as_posix(),
                  "equal": archive.read(path.relative_to(raw).as_posix()) == path.read_bytes()})
     census = Counter()
@@ -117,7 +127,7 @@ def analyze(directory):
                    "in_neutral_model": any(p["page_id"] == meta["page_uuid"] for p in model["pages"]),
                    "status": "no_pdf_background"}
             if background:
-                pdf_path = Path(background["media_path"])
+                pdf_path = recorded_path(background["media_path"])
                 with fitz.open(pdf_path) as pdf:
                     page = pdf[background["page_index"]]
                     rect = fitz.Rect(background["rect"])
@@ -143,7 +153,7 @@ def analyze(directory):
     diagnostic["all_pressure_lengths_match"] = all(s["point_count"] == s["pressure_count"] for s in stroke_stats)
     diagnostic["all_timestamp_lengths_match"] = all(s["point_count"] == s["timestamp_count"] for s in stroke_stats)
     diagnostic["pen_names_resolved"] = sum(bool(s["pen_name"]) for s in stroke_stats)
-    diagnostic["input_still_unchanged"] = sha256(Path(summary["input"]).read_bytes()) == summary["input_sha256"]
+    diagnostic["input_still_unchanged"] = sha256(recorded_path(summary["input"]).read_bytes()) == summary["input_sha256"]
     write_json(directory / "diagnostics.json", diagnostic)
     write_json(directory / "stroke_inventory.json", stroke_stats)
     write_json(directory / "pdf_words_in_note.json", mapped_words)

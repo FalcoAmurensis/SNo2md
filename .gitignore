@@ -1,10 +1,19 @@
-# Private input and generated research artifacts
-/data/
-/docs/data/
-/research/output/
-/research/upstream/
-/research/.venv/
-/research/*.log
-__pycache__/
+# Default deny: development docs, private data, outputs and environments stay local.
+*
+!/.gitignore
 
-/.venv/
+# Only project source code and its required configuration/notices are eligible.
+!/src/
+!/src/**/
+!/src/**/*.py
+!/src/requirements.txt
+!/src/research/requirements.txt
+!/src/research/upstream_versions.json
+!/src/third_party/pypdf-LICENSE.txt
+
+# Generated Python files are never source.
+**/__pycache__/
+*.py[cod]
+
+#credentials
+.env 

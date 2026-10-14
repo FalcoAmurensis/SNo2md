@@ -1,1 +1,0 @@
-sample_id,sdocx_ref,note_uuid,note_page_id,note_page_index,pdf_page_index,mark_type,expected_quote,expected_range_note,actual_quote,review_status,needs_text_or_range_edit,error_cause,ground_truth_ref,reviewer_notes

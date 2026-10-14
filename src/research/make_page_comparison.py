@@ -8,7 +8,7 @@ from pathlib import Path
 import fitz
 from PIL import Image, ImageDraw, ImageFont
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2] / 'private'
 SOURCE = ROOT / 'output/standalone-2026-10-14/jssc'
 OUT = ROOT / 'output/comparison-jssc-page003'
 page = json.loads((SOURCE / 'structure.json').read_text())['pages'][2]

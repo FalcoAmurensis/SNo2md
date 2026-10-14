@@ -15,8 +15,8 @@ import sys
 import traceback
 import zipfile
 
-ROOT = Path(__file__).resolve().parents[1]
-UPSTREAM = ROOT / "research/upstream"
+ROOT = Path(__file__).resolve().parents[2]
+UPSTREAM = ROOT / "private/upstream"
 sys.path.insert(0, str(UPSTREAM / "Dietrich"))
 sys.path.insert(0, str(UPSTREAM / "sdocx_parser"))
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -176,7 +176,7 @@ def inspect(path, out, render_count):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=ROOT / "docs/data")
+    parser.add_argument("--input", type=Path, default=ROOT / "private/samples")
     parser.add_argument("--output", type=Path, required=True, help="New directory; refuses to overwrite an existing run")
     parser.add_argument("--render-count", type=int, default=2)
     args = parser.parse_args()
