@@ -18,8 +18,19 @@
 **/__pycache__/
 *.py[cod]
 
-#credentials
+#credentials    
 .env 
 
 
 !/README.md
+# Installable conversion package metadata
+!/src/pyproject.toml
+
+# Optional Markdown font decoding notices
+!/src/third_party/fonttools-LICENSE.txt
+!/src/third_party/fonttools-LICENSE.external.txt
+
+# Python packaging artifacts
+/src/build/
+/src/dist/
+/src/*.egg-info/
