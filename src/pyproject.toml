@@ -12,9 +12,13 @@ license-files = ["third_party/pypdf-LICENSE.txt", "third_party/fonttools-LICENSE
 
 [project.optional-dependencies]
 markdown = ["fonttools==4.66.1"]
+desktop = ["fonttools==4.66.1", "pywin32==312; sys_platform == 'win32'"]
 
 [project.scripts]
 sno2md = "sno2md.cli:main"
+
+[project.gui-scripts]
+sno2md-gui = "sno2md.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

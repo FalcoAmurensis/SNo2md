@@ -1,12 +1,18 @@
 """CLI shared by the package entry point and legacy script."""
 import argparse
+import sys
 from pathlib import Path
 from .api import convert_pdf, export_note
 from .model import ConversionOptions
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='SDOCX to PDF, optionally with Markdown.')
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == 'sync':
+        from .sync_cli import main as sync_main
+        return sync_main(argv[1:])
+    parser = argparse.ArgumentParser(description='SDOCX to PDF, optionally with Markdown.',
+                                     epilog='Backup/Vault synchronization: sno2md sync --help')
     parser.add_argument('source',type=Path)
     parser.add_argument('output',type=Path,help='New PDF path, or output/Vault directory with --bundle')
     parser.add_argument('--width-scale',type=float,default=0.5)

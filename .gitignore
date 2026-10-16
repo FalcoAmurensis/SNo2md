@@ -2,13 +2,15 @@
 *
 !/.gitignore
 
-# Only project source code and its required configuration/notices are eligible.
+# Only runtime source code and its required configuration/notices are eligible.
 !/src/
-!/src/**/
-!/src/**/*.py
+!/src/sno2md/
+!/src/sno2md/*.py
+!/src/desktop/
+!/src/desktop/launcher.py
+!/src/convert_sdocx.py
 !/src/requirements.txt
-!/src/research/requirements.txt
-!/src/research/upstream_versions.json
+!/src/third_party/
 !/src/third_party/pypdf-LICENSE.txt
 # Allow attachments
 !/attachments/
@@ -34,3 +36,8 @@
 /src/build/
 /src/dist/
 /src/*.egg-info/
+
+# Local development material and generated artifacts stay outside the public source.
+/docs/
+/research/
+/private/

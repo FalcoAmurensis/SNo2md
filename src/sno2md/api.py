@@ -47,7 +47,7 @@ def convert_pdf(source, destination, *, options=None):
 def export_note(source, vault_root, *, name=None, options=None):
     """Decode once in memory and write PDF/MD without an external asset store.
 
-    Existing outputs are never replaced. Crash recovery/automatic updates are Phase 3.
+    Existing outputs are never replaced here. The sync layer manages replacement/recovery.
     """
     options = options or ConversionOptions()
     source, vault = Path(source), Path(vault_root).resolve()
