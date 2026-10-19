@@ -178,6 +178,7 @@ def read_note(source):
         if not order or len(expected) != len(order) or expected != {n for n in files if n.endswith('.page')}:
             raise Unsupported('empty, missing, duplicate, or unlisted note pages')
         metadata = note_header(files['note.note'])
+        metadata['media_version'] = Reader(files['media/mediaInfo.dat']).read('I')
         title = text_object(files['note.note'], metadata['title_object'])
         if text_object(files['note.note'], metadata['body_object']).strip():
             raise Unsupported('nonblank note body text is not yet supported')
@@ -199,6 +200,8 @@ def read_note(source):
                 if not pg['width'] or not pg['height']:
                     raise DecodeError('invalid page dimensions')
                 for bg in props.get('pdf', []):
+                    if bg['file_id'] not in media:
+                        raise DecodeError(f'unknown PDF media bind id {bg["file_id"]}')
                     bg['asset'] = 'media/' + media[bg['file_id']]
                     if bg['asset'] not in files: raise DecodeError('missing PDF asset')
                 for layer in pg['layers']:
@@ -217,6 +220,8 @@ def read_note(source):
                         elif obj['type'] in (3, 7):
                             obj['decoded'] = shape_profile(raw, obj)
                             if obj['type'] == 3:
+                                if obj['decoded']['image_id'] not in media:
+                                    raise DecodeError(f'unknown image media bind id {obj["decoded"]["image_id"]}')
                                 obj['decoded']['asset'] = 'media/' + media[obj['decoded']['image_id']]
                                 if obj['decoded']['asset'] not in files: raise DecodeError('missing image asset')
                         else: raise Unsupported(f'object type {obj["type"]} is unsupported')

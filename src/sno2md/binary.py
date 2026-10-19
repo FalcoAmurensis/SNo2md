@@ -39,19 +39,46 @@ def sidecars(files):
     if r.pos != r.end:
         raise ValueError('unconsumed pageIdInfo bytes')
     r = Reader(files['media/mediaInfo.dat'])
-    version, count = r.read('I'), r.read('H')
-    if version not in (5304, 5500):
-        raise ValueError(f'unsupported media version {version}')
-    media = []
-    for _ in range(count):
-        size = r.read('I')
-        e = Reader(r.take(size))
-        media.append({'id': e.read('I'), 'filename': e.string(),
-                      'check_ascii': e.take(64).decode('ascii'), 'ref_count': e.read('H'),
-                      'modified_raw': e.read('Q'), 'attached': e.read('B'),
-                      'extra_hex': e.take(e.end - e.pos).hex()})
-    if r.take(r.end - r.pos) != b'EOFX':
-        raise ValueError('unexpected media footer')
+    version, context = None, 'header'
+    media, ids = [], set()
+    try:
+        version = r.read('I')
+        count = r.read('H')
+        # Match the observed record layout, not a version-number allowlist.
+        # Unknown extensions must be investigated before they can be consumed.
+        for index in range(count):
+            context = f'record {index + 1} at byte {r.pos}'
+            size = r.read('I')
+            e = Reader(r.take(size))
+            entry = {'id': e.read('I'), 'filename': e.string(),
+                     'check_ascii': e.take(64).decode('ascii'), 'ref_count': e.read('H'),
+                     'modified_raw': e.read('Q'), 'attached': e.read('B'),
+                     'extra_hex': e.take(e.end - e.pos).hex()}
+            if entry['extra_hex']:
+                raise ValueError('unsupported extra media record data')
+            if entry['id'] in ids:
+                raise ValueError(f'duplicate media bind id {entry["id"]}')
+            filename = entry['filename']
+            if (not filename or filename in ('.', '..') or
+                    any(c in filename for c in '/\\:\x00')):
+                raise ValueError('invalid media filename')
+            checksum = entry['check_ascii']
+            if any(c not in '0123456789abcdefABCDEF' for c in checksum):
+                raise ValueError('invalid media SHA-256 checksum encoding')
+            if entry['attached'] not in (0, 1):
+                raise ValueError(f'unsupported media attached flag {entry["attached"]}')
+            asset = 'media/' + filename
+            if asset not in files:
+                raise ValueError(f'missing media asset: {asset}')
+            if hashlib.sha256(files[asset]).hexdigest() != checksum.lower():
+                raise ValueError(f'media checksum mismatch: {asset}')
+            ids.add(entry['id'])
+            media.append(entry)
+        context = 'footer'
+        if r.take(r.end - r.pos) != b'EOFX':
+            raise ValueError('unexpected media footer')
+    except (ValueError, struct.error) as error:
+        raise ValueError(f'invalid mediaInfo.dat (version {version}, {context}): {error}') from error
     return pages, media
 
 
@@ -260,6 +287,7 @@ def inspect(source, output):
                         strokes += 1
                         points += len(sub['stroke']['points'])
     result = {'note': note_header(files['note.note']), 'page_order': order, 'media': media,
+              'media_version': Reader(files['media/mediaInfo.dat']).read('I'),
               'pages': pages, 'unlisted_pages': sorted(set(n for n in files if n.endswith('.page')) -
                                                       {p['source'] for p in pages}),
               'inventory': {name: {'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
