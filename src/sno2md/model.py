@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Optional
 
 
+MARKDOWN_SCHEMA = 1
+GENERATOR_VERSION = 'md-1-pymupdf4llm-1.28.2'
+
+
 class DecodeError(ValueError):
     """Input could not be decoded without losing note content."""
 

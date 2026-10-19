@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from .model import GENERATOR_VERSION
 
 
 class Conflict(ValueError):
@@ -162,6 +163,7 @@ def publish_pair(root, config, state, source, generated, fingerprint, options):
                     raise Conflict(f'output changed while copying: {path}')
         from datetime import datetime, timezone
         success = {'revision': (previous or {}).get('revision', 0)+1,
+                   'generator_version': GENERATOR_VERSION,
                    'input': fingerprint, 'options': options, 'outputs': hashes,
                    'at': datetime.now(timezone.utc).isoformat()}
         journal = {'source': source, 'name': entry['name'], 'stage': str(stage),

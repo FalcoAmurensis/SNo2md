@@ -11,7 +11,7 @@ import time
 
 from .api import export_note
 from .locations import require_separate
-from .model import ConversionOptions
+from .model import ConversionOptions, GENERATOR_VERSION
 from .sync_storage import Conflict, check_outputs, file_digest, publish_pair, recover, save_json
 
 
@@ -208,7 +208,9 @@ class Synchronizer:
                     continue
                 check_outputs(config, entry)
                 success = entry.get('success', {})
-                if key not in self.refresh and success.get('input') == value and success.get('options') == self.options:
+                if (key not in self.refresh and success.get('input') == value and
+                        success.get('options') == self.options and
+                        success.get('generator_version') == GENERATOR_VERSION):
                     self.status(key, 'synced')
                     continue
                 if now < self.retry_after.get(key, 0):

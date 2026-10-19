@@ -25,6 +25,12 @@
 
 
 !/README.md
+!/LICENSE
+!/src/LICENSE
+!/src/third_party/flatbuffers-LICENSE.txt
+!/src/third_party/pymupdf-COPYING.txt
+!/src/third_party/pymupdf4llm-COPYING.txt
+!/src/third_party/pymupdf-layout-COPYING.txt
 # Installable conversion package metadata
 !/src/pyproject.toml
 

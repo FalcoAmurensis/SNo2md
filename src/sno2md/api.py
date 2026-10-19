@@ -1,11 +1,11 @@
 """Public conversion operations. Single exports never overwrite existing files."""
 import os
-from importlib.util import find_spec
 from pathlib import Path
 import tempfile
 
 from .decoder import read_note
 from .export import render_markdown
+from .markdown_engine import SourceMarkdown
 from .model import ConversionOptions, ConversionResult, OutputError
 from .pdf import prepare_backgrounds, write_pdf
 
@@ -57,23 +57,22 @@ def export_note(source, vault_root, *, name=None, options=None):
         raise ValueError('name must be a valid filename stem, without directories')
     pdf_path, md_path = new_path(vault/(name+'.pdf')), new_path(vault/(name+'.md'))
     for path in (pdf_path, md_path): protect_source(source,path)
-    if find_spec('fontTools') is None:
-        raise ValueError("Markdown export requires fontTools: pip install 'sno2md[markdown]'")
     note = read_note(source)
-    backgrounds = prepare_backgrounds(note,extract_text=True)
+    backgrounds = prepare_backgrounds(note)
     published = []
     try:
         vault.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.sno2md-', dir=vault) as output_tmp:
             output_stage = Path(output_tmp)
             counts = write_pdf(note, output_stage/'output.pdf', options, backgrounds)
-            markdown = render_markdown(note, pdf_path.name, backgrounds)
+            with SourceMarkdown(note) as engine:
+                markdown = render_markdown(note, pdf_path.name, backgrounds, engine)
             (output_stage/'output.md').write_text(markdown, encoding='utf-8')
             for staged, target in ((output_stage/'output.pdf',pdf_path),(output_stage/'output.md',md_path)):
                 publish_file(staged,target)
                 published.append((target,target.stat()))
         return ConversionResult(pdf=pdf_path, markdown=md_path, counts=counts,
-                                warnings=['PDF text is unstructured extraction; reading order and table layout are not guaranteed.'])
+                                warnings=['Markdown uses original PDF pages without OCR; reading order, tables, and formulas may need review.'])
     except Exception as error:
         failures = []
         for path, stamp in reversed(published):
