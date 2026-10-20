@@ -10,7 +10,7 @@ from .locations import state_directory
 
 
 STATUS = {'pending': '대기', 'waiting': '입력 안정화 대기', 'converting': '변환 중',
-          'synced': '완료', 'missing': '원본 없음', 'conflict': '충돌', 'error': '실패'}
+          'queued': '변환 순서 대기', 'ready_to_publish': '저장 대기', 'synced': '완료', 'missing': '원본 없음', 'conflict': '충돌', 'error': '실패'}
 RETRYABLE = {'error', 'conflict', 'missing', 'pending', 'waiting'}
 
 
@@ -31,6 +31,7 @@ class Application:
         self.backup = tk.StringVar()
         self.vault = tk.StringVar()
         self.width = tk.StringVar(value='0.5')
+        self.workers = tk.StringVar(value='auto')
         self.autostart = tk.BooleanVar(value=True)
         self.banner = tk.StringVar(value='설정을 불러오는 중…')
         window.title('SNo2md — 삼성노트 동기화')
@@ -65,6 +66,9 @@ class Application:
         ttk.Label(options, text='필기 굵기 배율').pack(side='left')
         self.width_box = ttk.Entry(options, textvariable=self.width, width=7)
         self.width_box.pack(side='left', padx=(8, 22))
+        ttk.Label(options, text='동시 변환').pack(side='left')
+        self.workers_box = ttk.Combobox(options, textvariable=self.workers, values=('auto', *range(1, 9)), width=5, state='readonly')
+        self.workers_box.pack(side='left', padx=(8, 15))
         self.startup_box = ttk.Checkbutton(options, text='Windows 로그인 시 시작', variable=self.autostart)
         self.startup_box.pack(side='left')
         self.save_button = ttk.Button(options, text='설정 저장', command=self.save)
@@ -112,10 +116,11 @@ class Application:
         idle = self.initialized and not busy and not self.closing
         for widget in (self.save_button, self.width_box, self.startup_box):
             widget.configure(state='normal' if idle else 'disabled')
+        self.workers_box.configure(state='readonly' if idle else 'disabled')
         for widget in (self.folder_button, self.file_button, self.vault_button):
-            widget.configure(state='normal' if idle and self.config is None else 'disabled')
+            widget.configure(state='normal' if idle else 'disabled')
         for widget in (self.backup_box, self.vault_box):
-            widget.configure(state='normal' if idle and self.config is None else 'disabled')
+            widget.configure(state='normal' if idle else 'disabled')
         self.once_button.configure(state='normal' if idle and self.config else 'disabled')
         self.open_button.configure(state='normal' if self.config else 'disabled')
         stopping = busy and self.controller.stop_event.is_set()
@@ -142,7 +147,8 @@ class Application:
             width = float(self.width.get())
             from .model import ConversionOptions
             ConversionOptions(width_scale=width)
-            values = (self.backup.get(), self.vault.get(), width, self.autostart.get(), self.native)
+            from .worker import worker_count
+            values = (self.backup.get(), self.vault.get(), width, self.autostart.get(), self.native, worker_count(self.workers.get()))
             self.failed = False
             self.controller.launch(lambda: self.controller.save_settings(*values))
             self.banner.set('설정을 저장하는 중…')
@@ -150,8 +156,16 @@ class Application:
             self.error(str(error))
         self.controls()
 
+    def paths_saved(self):
+        if self.config and (self.backup.get() != self.config['backup'] or
+                            self.vault.get() != self.config['vault']):
+            self.error('경로를 변경했습니다. 먼저 설정 저장을 눌러 주세요.')
+            return False
+        return True
+
     def sync_once(self, sources=None):
         if self.controller.busy or self.config is None: return
+        if not self.paths_saved(): return
         self.failed = False
         self.controller.start(only_sources=sources)
         self.banner.set('동기화 준비 중…')
@@ -161,8 +175,11 @@ class Application:
         if self.controller.busy:
             if self.controller.kind in ('watch','sync'):
                 self.controller.stop()
-                self.banner.set('현재 문서를 안전하게 마친 뒤 중지합니다.')
+                self.banner.set('이미 시작한 변환과 저장을 마친 뒤 중지합니다.')
         elif self.config and not self.closing:
+            if not self.paths_saved():
+                self.show()
+                return
             self.failed = False
             self.controller.start(watch=True)
             self.banner.set('백업 감시 중…')
@@ -178,6 +195,7 @@ class Application:
         from tkinter import simpledialog
         key = self.selected()
         if not key or self.controller.busy: return
+        if not self.paths_saved(): return
         name = simpledialog.askstring('출력 이름 변경', '새 파일 이름 (확장자 제외)\n기존 PDF·MD는 보존합니다.',
                                       initialvalue=self.notes[key]['name'], parent=self.window)
         if name:
@@ -214,11 +232,15 @@ class Application:
         for number, (key, entry) in enumerate(self.notes.items()):
             iid = str(number)
             self.tree_keys[iid] = key
-            self.tree.insert('', 'end', iid=iid, values=(entry['name'], STATUS.get(entry['status'], entry['status']), key))
+            self.tree.insert('', 'end', iid=iid, values=('/'.join(p for p in (entry.get('folder', ''), entry['name']) if p), STATUS.get(entry['status'], entry['status']), key))
             if key == selected: self.tree.selection_set(iid)
         converting = [e['name'] for e in self.notes.values() if e['status'] == 'converting']
-        if converting and self.controller.busy and not self.controller.stop_event.is_set():
-            self.banner.set('변환 중: '+converting[0])
+        ready = sum(e['status'] == 'ready_to_publish' for e in self.notes.values())
+        queued = sum(e['status'] == 'queued' for e in self.notes.values())
+        if self.controller.busy and self.controller.stop_event.is_set():
+            self.banner.set(f'중지 중 · 실행 중인 {len(converting)+ready}개를 마무리합니다. 새 문서는 시작하지 않습니다.')
+        elif (converting or ready or queued) and self.controller.busy:
+            self.banner.set(f'변환 작업 {len(converting)}개 · 순서 대기 {queued}개 · 저장 대기 {ready}개')
         elif self.controller.busy and self.controller.kind == 'watch' and not self.controller.stop_event.is_set():
             issues = sum(e['status'] in ('error', 'conflict', 'missing') for e in self.notes.values())
             self.banner.set(f'백업 감시 중 · 확인할 문서 {issues}개' if issues else '백업 감시 중…')
@@ -258,6 +280,7 @@ class Application:
                     self.backup.set(value['backup'])
                     self.vault.set(value['vault'])
                     self.width.set(str(value['width_scale']))
+                    self.workers.set(str(value.get('workers', 'auto')))
                     self.autostart.set(value.get('start_on_login', False))
                 elif kind == 'locations':
                     self.backup_box.configure(values=value['backup'])
@@ -279,7 +302,7 @@ class Application:
                             self.window.after(100, self.toggle)
                         elif self.startup: self.show()
                     if not self.failed and not self.closing:
-                        issues = sum(e['status'] in ('error','conflict','missing') for e in self.notes.values())
+                        issues = sum(e['status'] in ('error','conflict','missing','waiting','pending') for e in self.notes.values())
                         self.banner.set(f'대기 중 · 확인할 문서 {issues}개' if issues else '대기 중')
         except Empty:
             pass
@@ -293,6 +316,8 @@ class Application:
 
 
 def main(argv=None):
+    from multiprocessing import freeze_support
+    freeze_support()
     parser = argparse.ArgumentParser(description='SNo2md Windows desktop')
     parser.add_argument('--startup', action='store_true', help='Start hidden and resume configured watching')
     args = parser.parse_args(argv)

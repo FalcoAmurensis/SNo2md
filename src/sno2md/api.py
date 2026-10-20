@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import tempfile
+import time
 
 from .decoder import read_note
 from .export import render_markdown
@@ -44,11 +45,18 @@ def convert_pdf(source, destination, *, options=None):
         raise OutputError(f'PDF output failed: {error}') from error
 
 
-def export_note(source, vault_root, *, name=None, options=None):
+def export_note(source, vault_root, *, name=None, options=None, timings=None):
     """Decode once in memory and write PDF/MD without an external asset store.
 
     Existing outputs are never replaced here. The sync layer manages replacement/recovery.
     """
+    timings = timings if timings is not None else {}
+    def measured(label, function, *args):
+        started = time.perf_counter()
+        try:
+            return function(*args)
+        finally:
+            timings[label] = time.perf_counter()-started
     options = options or ConversionOptions()
     source, vault = Path(source), Path(vault_root).resolve()
     name = name if name is not None else (source.stem if source.is_file() else source.name)
@@ -57,16 +65,18 @@ def export_note(source, vault_root, *, name=None, options=None):
         raise ValueError('name must be a valid filename stem, without directories')
     pdf_path, md_path = new_path(vault/(name+'.pdf')), new_path(vault/(name+'.md'))
     for path in (pdf_path, md_path): protect_source(source,path)
-    note = read_note(source)
-    backgrounds = prepare_backgrounds(note)
+    note = measured("decode", read_note, source)
+    backgrounds = measured("backgrounds", prepare_backgrounds, note)
     published = []
     try:
         vault.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.sno2md-', dir=vault) as output_tmp:
             output_stage = Path(output_tmp)
-            counts = write_pdf(note, output_stage/'output.pdf', options, backgrounds)
+            counts = measured('pdf', write_pdf, note, output_stage/'output.pdf', options, backgrounds)
+            started = time.perf_counter()
             with SourceMarkdown(note) as engine:
                 markdown = render_markdown(note, pdf_path.name, backgrounds, engine)
+            timings['markdown'] = time.perf_counter()-started
             (output_stage/'output.md').write_text(markdown, encoding='utf-8')
             for staged, target in ((output_stage/'output.pdf',pdf_path),(output_stage/'output.md',md_path)):
                 publish_file(staged,target)

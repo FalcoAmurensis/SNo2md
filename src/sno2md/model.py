@@ -6,7 +6,7 @@ from typing import Optional
 
 
 MARKDOWN_SCHEMA = 1
-GENERATOR_VERSION = 'md-1-pymupdf4llm-1.28.2'
+GENERATOR_VERSION = 'md-2-pymupdf4llm-1.28.2'
 
 
 class DecodeError(ValueError):

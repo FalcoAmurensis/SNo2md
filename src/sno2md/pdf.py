@@ -2,6 +2,7 @@
 from collections import Counter
 from io import BytesIO
 import math
+import struct
 from pypdf import PdfReader, PdfWriter, PageObject, Transformation
 from pypdf.generic import DictionaryObject, NameObject, NumberObject, FloatObject, DecodedStreamObject
 from .decoder import png_pixels
@@ -21,6 +22,34 @@ def stream_object(data):
 
 
 def image_object(writer, data):
+    if data.startswith(b'\xff\xd8'):
+        # Preserve the original JPEG stream; SOF provides dimensions/components.
+        pos = 2
+        while pos < len(data):
+            if data[pos] != 0xff:
+                raise Unsupported('invalid JPEG marker')
+            while pos < len(data) and data[pos] == 0xff:
+                pos += 1
+            if pos >= len(data): break
+            marker = data[pos]; pos += 1
+            if marker in (0xda, 0xd9): break
+            if marker in (0x01, *range(0xd0, 0xd8)): continue
+            if pos + 2 > len(data): break
+            size = int.from_bytes(data[pos:pos+2], 'big')
+            if size < 2 or pos + size > len(data): break
+            if marker in (0xc0, 0xc1, 0xc2):
+                if size < 8: break
+                bits, height, width, channels = struct.unpack_from('>BHHB', data, pos+2)
+                if bits != 8 or not width or not height or channels not in (1, 3):
+                    raise Unsupported('unsupported JPEG color/depth')
+                obj = stream_object(data)
+                obj.update({NameObject('/Type'): NameObject('/XObject'), NameObject('/Subtype'): NameObject('/Image'),
+                            NameObject('/Width'): NumberObject(width), NameObject('/Height'): NumberObject(height),
+                            NameObject('/ColorSpace'): NameObject('/DeviceGray' if channels == 1 else '/DeviceRGB'),
+                            NameObject('/BitsPerComponent'): NumberObject(8), NameObject('/Filter'): NameObject('/DCTDecode')})
+                return writer._add_object(obj)
+            pos += size
+        raise Unsupported('missing supported JPEG frame header')
     width, height, rgb, alpha = png_pixels(data)
     def make(pixels, color):
         obj = stream_object(pixels).flate_encode()
@@ -83,6 +112,10 @@ def overlay(writer, pg, files, width_scale, counters):
                         c2 = [x+2/3*(qx-x),y+2/3*(qy-y)]
                         commands.append(' '.join(number(v) for v in [*c1,*c2,x,y])+' c')
                         current = [x,y]
+                    elif verb == 4:
+                        if current is None: raise Unsupported('cubic without current point')
+                        commands.append(' '.join(number(v) for v in xy)+' c')
+                        current = xy[-2:]
                     else: commands.append('h')
                 commands.append('S Q')
                 counters['shapes'] += 1

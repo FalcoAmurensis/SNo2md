@@ -81,7 +81,18 @@ def output_paths(config, entry):
     name = entry['name']
     if not name or name in ('.', '..') or any(c in name for c in '/\\:*?"<>|'):
         raise ValueError('invalid registered output name')
-    return {ext: Path(config['vault'])/(name+'.'+ext) for ext in ('pdf', 'md')}
+    vault = Path(config['vault']).resolve()
+    folder = entry.get('folder', '')
+    parts = folder.split('/') if folder else []
+    parent = vault
+    for part in parts:
+        if (not part or part in ('.', '..') or part.endswith((' ', '.'))
+                or any(ord(c) < 32 or c in '\\:*?\"<>|' for c in part)):
+            raise ValueError('invalid registered output folder')
+        parent = parent/part
+        if parent.is_symlink() or not parent.resolve().is_relative_to(vault):
+            raise Conflict('output folder escapes Vault or is a symlink')
+    return {ext: parent/(name+'.'+ext) for ext in ('pdf', 'md')}
 
 
 def check_outputs(config, entry):
@@ -102,7 +113,7 @@ def recover(root, config, state):
     vault = Path(config['vault']).resolve()
     if stage.parent.resolve() != vault or not stage.name.startswith('.sno2md-sync-'):
         raise Conflict('invalid recovery stage location')
-    if journal['name'] != entry['name']:
+    if journal['name'] != entry['name'] or journal.get('folder', '') != entry.get('folder', ''):
         raise Conflict('output name changed during pending recovery')
     for ext, path in output_paths(config, entry).items():
         held = stage/'held'/path.name
@@ -141,6 +152,7 @@ def publish_pair(root, config, state, source, generated, fingerprint, options):
     entry = state['notes'][source]
     check_outputs(config, entry)
     paths = output_paths(config, entry)
+    paths['pdf'].parent.mkdir(parents=True, exist_ok=True)
     old = dict(entry.get('success', {}).get('outputs', {}))
     stage = Path(tempfile.mkdtemp(prefix='.sno2md-sync-', dir=config['vault']))
     journal_path = root/'journal.json'
@@ -166,7 +178,7 @@ def publish_pair(root, config, state, source, generated, fingerprint, options):
                    'generator_version': GENERATOR_VERSION,
                    'input': fingerprint, 'options': options, 'outputs': hashes,
                    'at': datetime.now(timezone.utc).isoformat()}
-        journal = {'source': source, 'name': entry['name'], 'stage': str(stage),
+        journal = {'source': source, 'name': entry['name'], 'folder': entry.get('folder', ''), 'stage': str(stage),
                    'old': old, 'success': success}
         save_json(journal_path, journal)
         for ext, path in paths.items():

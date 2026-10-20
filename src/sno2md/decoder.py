@@ -1,6 +1,7 @@
 """Decode supported SDOCX content once, independently of output format."""
 from pathlib import Path, PurePosixPath
 import struct
+import math
 import zipfile
 import zlib
 from .binary import Reader, load_input, note_header, page, sidecars
@@ -45,7 +46,7 @@ def subrecord(data, obj, kind):
 
 def shape_profile(data, obj):
     """Observed v4000 shape profile, derived directly from sample bytes.
-    Path verbs: 1 move, 2 line, 3 quadratic, 6 close. Unknown profiles fail.
+    Path verbs: 1 move, 2 line, 3 quadratic, 4 cubic, 6 close. Unknown profiles fail.
     """
     b = subrecord(data, obj, 7)
     r = Reader(b, 6)
@@ -54,7 +55,7 @@ def shape_profile(data, obj):
     mask = int.from_bytes(r.take(r.read('B')), 'little')
     kind = r.read('I')
     bounds = r.read('dddd')
-    reserved = r.read('I')
+    rotation = r.read('f')
     path_size = r.read('I')
     path = Reader(r.take(path_size))
     commands = []
@@ -64,21 +65,33 @@ def shape_profile(data, obj):
             values = path.read('dd')
         elif verb == 3:
             values = path.read('dddd')
+        elif verb == 4:
+            values = path.read('dddddd')
         elif verb == 6:
             values = []
         else:
             raise Unsupported(f'unknown shape path verb {verb}')
         commands.append((verb, values))
-    if path.pos != path.end or reserved:
+    if path.pos != path.end or not math.isfinite(rotation) or any(
+            not math.isfinite(v) for _, values in commands for v in values):
         raise Unsupported('unknown shape path layout')
+    # Observed 0x1000 extension adds a trailing byte (02), after the same
+    # length-delimited TextCommon/fill. Do not accept other extension payloads.
+    extended = bool(mask & 0x1000)
+    gap = b[r.pos:own]
     if obj['type'] == 7:
-        if (flags, mask) != (4, 1) or kind not in (1, 4, 88) or own - r.pos != 33:
+        expected_gap = 49 if kind == 2 else 33
+        if (flags, mask & ~0x1000) != (4, 1) or kind not in (1, 2, 4, 88, 90) or len(gap) != expected_gap:
             raise Unsupported('unknown outline shape profile')
         # The shape has a TextCommon block; nonempty text must not be omitted.
         t = Reader(b, own)
         text = Reader(t.take(t.read('I')))
         if text.take(text.read('I') * 2).decode('utf-16-le').strip():
             raise Unsupported('text inside shape is not supported')
+        if extended and b[t.pos:] != b'\x02':
+            raise Unsupported('unknown outline extension')
+        if not extended and t.pos != len(b):
+            raise Unsupported('unknown outline tail')
         style = subrecord(data, obj, 6)
         style_at = struct.unpack_from('<I', style, 6)[0]
         s = style[style_at:]
@@ -88,12 +101,16 @@ def shape_profile(data, obj):
             raise Unsupported('unknown outline style profile')
         return {'commands': commands, 'color': struct.unpack_from('<I', s, 7)[0],
                 'width': struct.unpack_from('<f', s, 27)[0]}
-    if (flags, mask, kind) != (0, 32, 4) or own != r.pos + 1:
+    if (flags, mask & ~0x1000, kind) != (0, 32, 4) or gap != b'\0' or rotation:
         raise Unsupported('unknown inserted image profile')
     image_own = subrecord(data, obj, 3)
     if image_own != bytes.fromhex('1100000003000000000001000400000000'):
         raise Unsupported('cropped/styled image is not supported')
     fill = b[own:]
+    if extended:
+        if len(fill) != 68 or fill[-1:] != b'\x02':
+            raise Unsupported('unknown image extension')
+        fill = fill[:-1]
     if len(fill) != 67 or fill[:6] != bytes.fromhex('3e0000000200'):
         raise Unsupported('unknown image fill')
     if fill[10:34] != bytes(24) or struct.unpack_from('<fff', fill, 34) != (100.0, 100.0, 0.0):

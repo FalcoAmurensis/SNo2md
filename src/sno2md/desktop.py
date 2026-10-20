@@ -8,7 +8,7 @@ from threading import Event, Thread
 
 from .locations import obsidian_vaults, samsung_locations
 from .sync import Synchronizer, rename_entry
-from .sync_config import create_config, load_config, load_state, new_config, update_config
+from .sync_config import create_config, load_config, load_state, new_config, update_config, change_paths
 from .sync_storage import Conflict, recover, store_lock
 
 
@@ -59,30 +59,28 @@ class DesktopController:
         if (self.root/'config.json').exists():
             self.events.put(('config', load_config(self.root)))
             self.state(load_state(self.root))
-        else:
-            candidates = {'backup': [], 'vault': []}
-            for key, function in (('backup', samsung_locations), ('vault', obsidian_vaults)):
-                try:
-                    candidates[key] = [str(p) for p in function()]
-                except (ValueError, OSError) as error:
-                    self.log(f'Location discovery: {error}')
-            self.events.put(('locations', candidates))
+        candidates = {'backup': [], 'vault': []}
+        for key, function in (('backup', samsung_locations), ('vault', obsidian_vaults)):
+            try:
+                candidates[key] = [str(p) for p in function()]
+            except (ValueError, OSError) as error:
+                self.log(f'Location discovery: {error}')
+        self.events.put(('locations', candidates))
         self.events.put(('initialized', None))
 
-    def save_settings(self, backup, vault, width_scale, start_on_login, native):
+    def save_settings(self, backup, vault, width_scale, start_on_login, native, workers='auto'):
         with store_lock(self.root):
             existing = (self.root/'config.json').exists()
             if existing:
                 config = load_config(self.root)
-                if (str(Path(backup).resolve()), str(Path(vault).resolve())) != (config['backup'], config['vault']):
-                    raise Conflict('changing the registered backup/Vault pair is not supported')
+                config = change_paths(self.root, config, backup, vault)
                 if (self.root/'journal.json').exists():
-                    recover(self.root, config, load_state(self.root))
-                config = dict(config, width_scale=width_scale)
+                    recover(self.root, load_config(self.root), load_state(self.root))
+                config = dict(config, width_scale=width_scale, workers=workers)
                 from .sync_config import validate_config
                 validate_config(self.root, config)
             else:
-                config = new_config(self.root, backup, vault, width_scale=width_scale)
+                config = new_config(self.root, backup, vault, width_scale=width_scale, workers=workers)
             config['start_on_login'] = bool(start_on_login)
             previous = native.get_startup_command()
             command = native.startup_command() if start_on_login else None
@@ -95,7 +93,9 @@ class DesktopController:
             except Exception:
                 native.set_startup_command(previous)
                 raise
+            state = load_state(self.root)
         self.events.put(('config', config))
+        self.state(state)
         self.log('설정을 저장했습니다.')
 
     def synchronize(self, watch=False, only_sources=None):

@@ -2,12 +2,17 @@
 import argparse
 from pathlib import Path
 import sys
+import signal
+from threading import Event
+from concurrent.futures.process import BrokenProcessPool
+from .worker import worker_count
 
 from .locations import (obsidian_registry, obsidian_vaults,
                         samsung_locations, state_directory)
 from .model import ConversionOptions
-from .sync_config import duration, load_config, load_state, new_config, create_config, update_config
-from .sync import Synchronizer, default_name, discover, rebind_entry, rename_entry
+from .sync_config import duration, load_config, load_state, new_config, create_config, update_config, change_paths
+from .sync import Synchronizer, default_name, discover, rebind_entry, rename_entry, registration
+from .catalog import read_catalog
 from .sync_storage import recover, save_json, store_lock
 
 
@@ -30,7 +35,7 @@ def setup(root, args):
     backup = args.backup or choose('Backup path', samsung_locations(args.windows_profile))
     vault = args.vault or choose('Obsidian Vault', obsidian_vaults(args.obsidian_config, args.windows_profile))
     config = new_config(root, backup, vault, width_scale=args.width_scale, mode=args.mode,
-                        poll=args.poll, settle=args.settle,
+                        poll=args.poll, settle=args.settle, workers=args.workers, wait_timeout=args.wait_timeout,
                         registry=args.obsidian_config or obsidian_registry(args.windows_profile))
     with store_lock(root):
         create_config(root, config)
@@ -54,16 +59,23 @@ def main(argv=None):
     setup_parser.add_argument('--width-scale', type=float, default=0.5)
     setup_parser.add_argument('--poll', type=duration, default=5.0)
     setup_parser.add_argument('--settle', type=duration, default=3.0)
+    setup_parser.add_argument('--workers', type=worker_count, default='auto')
+    setup_parser.add_argument('--wait-timeout', type=float, default=300.0)
     commands.add_parser('scan', help='Read-only discovery of supported archives/note folders')
     commands.add_parser('status', help='Show registered notes and last known status')
     for name in ('run', 'watch'):
         command = commands.add_parser(name, help='Sync once' if name == 'run' else 'Poll and sync until Ctrl+C')
+        command.add_argument('--workers', type=worker_count, help='Override auto or 1..8 for this run')
         command.add_argument('--refresh', action='store_true', help='Rebuild registered notes once even if inputs/options are unchanged')
     settings = commands.add_parser('settings', help='Read/change mode, width and polling; stop watch first')
+    settings.add_argument('--backup', type=Path)
+    settings.add_argument('--vault', type=Path)
     settings.add_argument('--mode', choices=('auto','manual'))
     settings.add_argument('--width-scale', type=float)
     settings.add_argument('--poll', type=duration)
     settings.add_argument('--settle', type=duration)
+    settings.add_argument('--workers', type=worker_count)
+    settings.add_argument('--wait-timeout', type=float)
     add = commands.add_parser('add', help='Register selected source keys in manual mode')
     add.add_argument('sources', nargs='*')
     rename = commands.add_parser('rename', help='Change output name; existing outputs are retained')
@@ -101,12 +113,15 @@ def main(argv=None):
         with store_lock(root):
             config = load_config(root)
             state = load_state(root)
-            if not Path(config['vault']).is_dir():
+            if args.command != 'settings' and not Path(config['vault']).is_dir():
                 raise FileNotFoundError('Vault unavailable; no outputs or recovery files changed')
             recover(root, config, state)
             if args.command == 'settings':
+                if args.backup is not None or args.vault is not None:
+                    config = change_paths(root, config, args.backup or config['backup'], args.vault or config['vault'])
                 for argument, key in (('mode','mode'), ('width_scale','width_scale'),
-                                      ('poll','poll_seconds'), ('settle','settle_seconds')):
+                                      ('poll','poll_seconds'), ('settle','settle_seconds'),
+                                      ('workers','workers'), ('wait_timeout','wait_timeout')):
                     if getattr(args, argument) is not None: config[key] = getattr(args, argument)
                 ConversionOptions(width_scale=config['width_scale'])
                 update_config(root, config)
@@ -124,8 +139,10 @@ def main(argv=None):
                     selected = [keys[int(i)-1] for i in indices]
                 for key in selected:
                     if key not in found: raise ValueError(f'unknown source key: {key}')
+                catalog = read_catalog(config['backup'])
                 for key in selected:
-                    state['notes'].setdefault(key, {'name': default_name(found[key]), 'status': 'pending', 'error': None})
+                    if key not in state['notes']:
+                        state['notes'][key] = registration(found[key], catalog, state)
                 save_json(root/'state.json', state)
             elif args.command in ('rename','rebind'):
                 source = args.source if args.command == 'rename' else args.old_source
@@ -134,14 +151,20 @@ def main(argv=None):
                 else: rebind_entry(config, state, source, args.new_source)
                 save_json(root/'state.json', state)
             elif args.command in ('run','watch'):
+                if args.workers is not None: config = dict(config, workers=args.workers)
                 engine = Synchronizer(root, config, state)
                 if args.refresh: engine.refresh.update(state['notes'])
-                engine.run(watch=args.command == 'watch')
+                stop = Event()
+                previous = signal.signal(signal.SIGINT, lambda *_: stop.set())
+                try:
+                    engine.run(watch=args.command == 'watch', stop_event=stop)
+                finally:
+                    signal.signal(signal.SIGINT, previous)
                 if args.command == 'run' and any(e['status'] != 'synced' for e in state['notes'].values()):
                     parser.exit(1, 'Some notes are pending, missing, conflicting or failed; see sync status.\n')
             elif args.command == 'recover':
                 print('Recovery complete.')
     except KeyboardInterrupt:
         print('\nStopped. Any pending publication will be recovered on the next run.')
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, BrokenProcessPool) as error:
         parser.exit(1, f'Sync failed: {error}\n')

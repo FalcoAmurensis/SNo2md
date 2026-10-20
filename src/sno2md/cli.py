@@ -7,6 +7,12 @@ from .model import ConversionOptions
 
 
 def main(argv=None):
+    from multiprocessing import freeze_support
+    freeze_support()
+    # Redirected Windows output otherwise uses the legacy code page (e.g. cp949).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            stream.reconfigure(encoding='utf-8', errors='backslashreplace')
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == 'sync':
         from .sync_cli import main as sync_main
