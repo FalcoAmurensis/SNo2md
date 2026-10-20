@@ -13,6 +13,11 @@ class Conflict(ValueError):
     pass
 
 
+class MissingOutput(Conflict):
+    """Previously managed output is absent."""
+    pass
+
+
 def read_json(path):
     return json.loads(Path(path).read_text(encoding='utf-8'))
 
@@ -95,11 +100,30 @@ def output_paths(config, entry):
     return {ext: parent/(name+'.'+ext) for ext in ('pdf', 'md')}
 
 
-def check_outputs(config, entry):
+def check_outputs(config, entry, allow_missing=False):
     expected = entry.get('success', {}).get('outputs', {})
+    missing = set()
+
     for ext, path in output_paths(config, entry).items():
-        if file_digest(path) != expected.get(ext):
-            raise Conflict(f'output changed or occupied: {path}; keep it and use a new output name')
+        current = file_digest(path)
+        recorded = expected.get(ext)
+
+        if current == recorded:
+            continue
+
+        if current is None and recorded is not None:
+            missing.add(ext)
+            continue
+
+        raise Conflict(f'output changed or occupied: {path}')
+
+    permitted = {'pdf', 'md'} if allow_missing is True else (set(allow_missing) if allow_missing else set())
+    if missing - permitted:
+        raise MissingOutput(
+            f'managed output missing: {", ".join(sorted(missing))}'
+        )
+
+    return missing
 
 
 def recover(root, config, state):
@@ -127,6 +151,8 @@ def recover(root, config, state):
             current = file_digest(path)
             if current not in (before, after, None):
                 raise Conflict(f'recovery blocked by edited output: {path}; backups retained at {stage}')
+            if before is None and current is not None and not os.path.samefile(path, stage/'new'/path.name):
+                raise Conflict(f'recovery blocked by newly occupied output: {path}; backups retained at {stage}')
             held = stage/'held'/path.name
             if held.exists() and file_digest(held) != before:
                 raise Conflict(f'concurrent edit retained at {held}; resolve it before retrying')
@@ -138,6 +164,8 @@ def recover(root, config, state):
             if current == before:
                 continue
             if current == after:
+                if before is None and not os.path.samefile(path, stage/'new'/path.name):
+                    raise Conflict(f'output occupied during rollback: {path}')
                 path.unlink()
             elif current is not None:
                 raise Conflict(f'output changed during rollback: {path}')
@@ -148,12 +176,16 @@ def recover(root, config, state):
     shutil.rmtree(stage)
 
 
-def publish_pair(root, config, state, source, generated, fingerprint, options):
+def publish_pair(root, config, state, source, generated, fingerprint, options, allow_missing=False):
     entry = state['notes'][source]
-    check_outputs(config, entry)
+    missing = check_outputs(config, entry, allow_missing=allow_missing)
+    if isinstance(allow_missing, (set, frozenset)) and missing != allow_missing:
+        raise Conflict('missing output paths changed during conversion; retry explicitly')
     paths = output_paths(config, entry)
     paths['pdf'].parent.mkdir(parents=True, exist_ok=True)
     old = dict(entry.get('success', {}).get('outputs', {}))
+    for ext in missing:
+        old[ext] = None  # Rollback must restore absence, not resurrect a deleted file.
     stage = Path(tempfile.mkdtemp(prefix='.sno2md-sync-', dir=config['vault']))
     journal_path = root/'journal.json'
     previous = entry.get('success')

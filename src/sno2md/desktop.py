@@ -68,7 +68,7 @@ class DesktopController:
         self.events.put(('locations', candidates))
         self.events.put(('initialized', None))
 
-    def save_settings(self, backup, vault, width_scale, start_on_login, native, workers='auto'):
+    def save_settings(self, backup, vault, width_scale, start_on_login, native, workers='auto', folder_rules=None):
         with store_lock(self.root):
             existing = (self.root/'config.json').exists()
             if existing:
@@ -81,6 +81,10 @@ class DesktopController:
                 validate_config(self.root, config)
             else:
                 config = new_config(self.root, backup, vault, width_scale=width_scale, workers=workers)
+            if folder_rules is not None:
+                from .sync_config import pair_key
+                config['folder_selections'] = dict(config.get('folder_selections', {}))
+                config['folder_selections'][pair_key(config)] = dict(folder_rules)
             config['start_on_login'] = bool(start_on_login)
             previous = native.get_startup_command()
             command = native.startup_command() if start_on_login else None
@@ -98,16 +102,27 @@ class DesktopController:
         self.state(state)
         self.log('설정을 저장했습니다.')
 
-    def synchronize(self, watch=False, only_sources=None):
+    def synchronize(self, watch=False, only_sources=None, restore_sources=None):
         with store_lock(self.root):
             config, state = load_config(self.root), load_state(self.root)
             engine = Synchronizer(self.root, config, state, emit=self.log, on_state=self.state)
+            if restore_sources:
+                if watch or any(key not in state['notes'] or not state['notes'][key].get('success') for key in restore_sources):
+                    raise ValueError('restore requires registered documents with successful output history')
+                engine.restore_targets.update(restore_sources)
+                only_sources = set(restore_sources)
             self.state(state)
             engine.run(watch=watch, stop_event=self.stop_event, only_sources=only_sources)
             self.state(state)
 
     def start(self, watch=False, only_sources=None):
         self.launch(lambda: self.synchronize(watch, only_sources), kind='watch' if watch else 'sync')
+
+    def restore(self, sources):
+        targets = {sources} if isinstance(sources, str) else set(sources)
+        if not targets:
+            raise ValueError('select at least one document to restore')
+        self.launch(lambda: self.synchronize(restore_sources=targets), kind='sync')
 
     def stop(self):
         self.stop_event.set()

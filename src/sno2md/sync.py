@@ -15,9 +15,10 @@ import time
 
 from .worker import ConversionJob, convert_job, choose_workers, initialize_worker
 from .catalog import read_catalog, note_title
+from .folder_selection import inventory, selection_for, enabled
 from .locations import require_separate
 from .model import GENERATOR_VERSION
-from .sync_storage import Conflict, check_outputs, file_digest, publish_pair, recover, save_json, store_lock
+from .sync_storage import MissingOutput, Conflict, check_outputs, file_digest, publish_pair, recover, save_json, store_lock
 
 
 class InputChanged(OSError):
@@ -173,6 +174,8 @@ class Synchronizer:
         self.on_state = on_state
         self.observed = {}
         self.refresh = set()
+        self.restore_targets = set()
+        self.restore_missing = {}
         self.retry_after = {}
         self.options = {'width_scale': config['width_scale']}
         self.metrics = {}
@@ -204,6 +207,9 @@ class Synchronizer:
         return self.measured('fingerprint', fingerprint, source)
 
     def failure(self, key, error):
+        # A failed attempt never grants a later automatic retry restoration rights.
+        self.restore_targets.discard(key)
+        self.restore_missing.pop(key, None)
         if (self.root/'journal.json').exists():
             raise error
         if isinstance(error, InputChanged):
@@ -211,7 +217,8 @@ class Synchronizer:
             self.status(key, 'waiting', str(error))
         else:
             self.retry_after[key] = time.monotonic() + 30
-            self.status(key, 'conflict' if isinstance(error, Conflict) else 'error', str(error))
+            status = 'missing_output' if isinstance(error, MissingOutput) else ('conflict' if isinstance(error, Conflict) else 'error')
+            self.status(key, status, str(error))
 
     def cleanup_jobs(self):
         # Called under the coordinator's state lock, only after journal recovery.
@@ -290,8 +297,11 @@ class Synchronizer:
                             raise InputChanged('input changed during conversion; will retry')
                         # publish_pair repeats ownership/user-edit checks immediately before writing.
                         self.measured('publish', publish_pair, self.root, self.config, self.state,
-                                      key, Path(result['output']), value, self.options)
+                                      key, Path(result['output']), value, self.options,
+                                      self.restore_missing.get(key, False))
                         self.refresh.discard(key)
+                        self.restore_targets.discard(key)
+                        self.restore_missing.pop(key, None)
                         self.notify()
                         self.emit(f'synced: {key} ({result["counts"]["pages"]} pages)')
                     except BrokenProcessPool:
@@ -326,10 +336,14 @@ class Synchronizer:
         recover(self.root, config, state)
         self.cleanup_jobs()
         found = self.measured('discover', discover, config['backup'])
+        folders = inventory(config['backup'], found)
+        rules = selection_for(config)
+        selected = {key for key, folder in folders['membership'].items()
+                    if enabled(folders['tree'], rules, folder)}
         if config['mode'] == 'auto':
-            catalog = read_catalog(config['backup']) if any(k not in state['notes'] for k in found) else {}
+            catalog = folders['catalog']
             for key, path in found.items():
-                if key not in state['notes']:
+                if key in selected and key not in state['notes']:
                     state['notes'][key] = registration(path, catalog, state)
                     save_json(self.root/'state.json', state)
                     self.emit(f'registered: {key} -> {state["notes"][key]["name"]}')
@@ -338,6 +352,13 @@ class Synchronizer:
         for key, entry in list(state['notes'].items()):
             if stop_event.is_set():
                 break
+            category = folders['membership'].get(key, entry.get('selection_folder', 'root'))
+            entry['selection_folder'] = category
+            if not enabled(folders['tree'], rules, category):
+                self.observed.pop(key, None)
+                self.retry_after.pop(key, None)
+                self.status(key, 'excluded')
+                continue
             if only_sources is not None and key not in only_sources:
                 continue
             if key not in found:
@@ -364,9 +385,12 @@ class Synchronizer:
                 if now - last[1] < config['settle_seconds']:
                     self.status(key, 'waiting', 'stability interval not reached')
                     continue
-                self.measured('check_outputs', check_outputs, config, entry)
+                missing = self.measured('check_outputs', check_outputs, config, entry,
+                                        key in self.restore_targets)
+                if key in self.restore_targets:
+                    self.restore_missing[key] = frozenset(missing)
                 success = entry.get('success', {})
-                if (key not in self.refresh and success.get('input') == value and
+                if (not missing and key not in self.refresh and success.get('input') == value and
                         success.get('options') == self.options and
                         success.get('generator_version') == GENERATOR_VERSION):
                     self.status(key, 'synced')

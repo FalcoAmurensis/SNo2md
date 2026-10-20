@@ -67,6 +67,8 @@ def main(argv=None):
         command = commands.add_parser(name, help='Sync once' if name == 'run' else 'Poll and sync until Ctrl+C')
         command.add_argument('--workers', type=worker_count, help='Override auto or 1..8 for this run')
         command.add_argument('--refresh', action='store_true', help='Rebuild registered notes once even if inputs/options are unchanged')
+        if name == 'run':
+            command.add_argument('--restore-missing', metavar='SOURCE', nargs='+', help='Explicitly restore missing outputs of these registered source keys only')
     settings = commands.add_parser('settings', help='Read/change mode, width and polling; stop watch first')
     settings.add_argument('--backup', type=Path)
     settings.add_argument('--vault', type=Path)
@@ -100,6 +102,8 @@ def main(argv=None):
         config = load_config(root)
         state = load_state(root)
         if args.command == 'status':
+            from .folder_selection import selection_for, summary
+            print('Folders: ' + summary(selection_for(config)))
             print(f'Backup: {config["backup"]}\nVault: {config["vault"]}\nMode: {config["mode"]}')
             for key, entry in state['notes'].items():
                 print(f'{entry["status"]}: {key} -> {entry["name"]}' + (f' — {entry["error"]}' if entry.get('error') else ''))
@@ -139,8 +143,14 @@ def main(argv=None):
                     selected = [keys[int(i)-1] for i in indices]
                 for key in selected:
                     if key not in found: raise ValueError(f'unknown source key: {key}')
-                catalog = read_catalog(config['backup'])
+                from .folder_selection import inventory, selection_for, enabled
+                folders = inventory(config['backup'], found)
+                catalog = folders['catalog']
+                rules = selection_for(config)
                 for key in selected:
+                    if not enabled(folders['tree'], rules, folders['membership'][key]):
+                        print(f'Excluded by folder selection: {key}')
+                        continue
                     if key not in state['notes']:
                         state['notes'][key] = registration(found[key], catalog, state)
                 save_json(root/'state.json', state)
@@ -153,14 +163,18 @@ def main(argv=None):
             elif args.command in ('run','watch'):
                 if args.workers is not None: config = dict(config, workers=args.workers)
                 engine = Synchronizer(root, config, state)
-                if args.refresh: engine.refresh.update(state['notes'])
+                restore = set(getattr(args, 'restore_missing', None) or [])
+                if any(key not in state['notes'] or not state['notes'][key].get('success') for key in restore):
+                    raise ValueError('restore requires registered documents with successful output history')
+                engine.restore_targets.update(restore)
+                if args.refresh: engine.refresh.update(restore or state['notes'])
                 stop = Event()
                 previous = signal.signal(signal.SIGINT, lambda *_: stop.set())
                 try:
-                    engine.run(watch=args.command == 'watch', stop_event=stop)
+                    engine.run(watch=args.command == 'watch', stop_event=stop, only_sources=restore or None)
                 finally:
                     signal.signal(signal.SIGINT, previous)
-                if args.command == 'run' and any(e['status'] != 'synced' for e in state['notes'].values()):
+                if args.command == 'run' and any(e['status'] not in ('synced', 'excluded') for key, e in state['notes'].items() if not restore or key in restore):
                     parser.exit(1, 'Some notes are pending, missing, conflicting or failed; see sync status.\n')
             elif args.command == 'recover':
                 print('Recovery complete.')

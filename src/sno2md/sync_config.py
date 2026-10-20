@@ -19,6 +19,9 @@ def duration(value):
 
 
 def validate_config(root, config):
+    for rules in config.get('folder_selections', {}).values():
+        if not isinstance(rules, dict) or any(not isinstance(k, str) or type(v) is not bool for k, v in rules.items()):
+            raise ValueError('invalid folder selection rules')
     require_separate(config['backup'], config['vault'], root)
     ConversionOptions(width_scale=config['width_scale'])
     duration(config['poll_seconds'])
@@ -105,7 +108,8 @@ def update_config(root, config):
     previous = load_config(root)
     validate_config(root, config)
     if pair_key(config) != pair_key(previous):
-        config = change_paths(root, config, config['backup'], config['vault'])
+        checked = new_config(root, config['backup'], config['vault'], width_scale=config['width_scale'])
+        config = dict(config, **{key: checked[key] for key in ('backup', 'vault', 'backup_kind')})
         from .sync_storage import recover
         state = load_state(root)
         if (root/'journal.json').exists():

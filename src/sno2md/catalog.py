@@ -21,7 +21,7 @@ def note_title(source):
         return ''
 
 
-def read_catalog(backup):
+def read_catalog(backup, *, with_tree=False):
     """Optional LocalState database; unrelated standalone notes need no database."""
     root = Path(backup)
     candidates = [root/'LocalState/Storage.sqlite', root/'Storage.sqlite']
@@ -29,7 +29,7 @@ def read_catalog(backup):
         candidates.append(root.parent/'Storage.sqlite')
     database = next((p for p in candidates if p.is_file()), None)
     if database is None:
-        return {}
+        return ({}, None) if with_tree else {}
     # SQLite can create WAL/SHM files even with mode=ro. Query a private copy,
     # including committed WAL data, so discovery never writes into the backup.
     with tempfile.TemporaryDirectory(prefix='sno2md-catalog-') as temporary:
@@ -66,5 +66,20 @@ def read_catalog(backup):
             result.append(name)
         return list(reversed(result))
     wdoc = database.parent/'wdoc'
-    return {str((wdoc/uuid).resolve()): {'title': (title or recommended or '').strip(),
-            'folders': category_path(category)} for uuid, title, recommended, category in notes}
+    catalog = {str((wdoc/uuid).resolve()): {'title': (title or recommended or '').strip(),
+            'folders': category_path(category), 'category': category} for uuid, title, recommended, category in notes}
+
+    if not with_tree:
+        return catalog
+    from .folder_selection import ROOT, UNCATEGORIZED, TRASH, category_id
+    tree = {ROOT: {'parent': None, 'name': '전체 폴더'},
+            UNCATEGORIZED: {'parent': ROOT, 'name': '미분류'},
+            TRASH: {'parent': ROOT, 'name': '휴지통'}}
+    for uuid, (parent, name) in folders.items():
+        category_path(uuid)  # Validate empty folders as well as occupied ones.
+        key = category_id(uuid)
+        if key in (UNCATEGORIZED, TRASH):
+            continue
+        parent_key = category_id(parent)
+        tree[key] = {'parent': ROOT if parent_key == UNCATEGORIZED else parent_key, 'name': name}
+    return catalog, tree
