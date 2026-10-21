@@ -69,6 +69,14 @@ def main(argv=None):
         command.add_argument('--refresh', action='store_true', help='Rebuild registered notes once even if inputs/options are unchanged')
         if name == 'run':
             command.add_argument('--restore-missing', metavar='SOURCE', nargs='+', help='Explicitly restore missing outputs of these registered source keys only')
+    for name in ('retire', 'resume'):
+        command = commands.add_parser(name, help='Change management policy without generating or deleting files')
+        command.add_argument('sources', nargs='+')
+    resolve = commands.add_parser('resolve', help='Resolve Markdown generated-region conflicts')
+    resolve.add_argument('sources', nargs='+')
+    resolve.add_argument('--choice', required=True, choices=('preserve-vault', 'use-source'))
+    resolve.add_argument('--yes', action='store_true', help='Confirm these exact inspected files without a prompt')
+    resolve.add_argument('--restore-missing', action='store_true', help='Also authorize the displayed missing outputs')
     settings = commands.add_parser('settings', help='Read/change mode, width and polling; stop watch first')
     settings.add_argument('--backup', type=Path)
     settings.add_argument('--vault', type=Path)
@@ -105,8 +113,16 @@ def main(argv=None):
             from .folder_selection import selection_for, summary
             print('Folders: ' + summary(selection_for(config)))
             print(f'Backup: {config["backup"]}\nVault: {config["vault"]}\nMode: {config["mode"]}')
+            engine = Synchronizer(root, config, state)
+            observations = engine.inspect()
+            from .sync_observation import GROUPS
             for key, entry in state['notes'].items():
-                print(f'{entry["status"]}: {key} -> {entry["name"]}' + (f' — {entry["error"]}' if entry.get('error') else ''))
+                item = observations[key]
+                print(f'{key} -> {entry["name"]}: policy={entry.get("sync_policy", "managed")}; '
+                      f'group={GROUPS[item["group"]]}; last={entry["status"]}; '
+                      f'source={item["source_exists"]}; missing={item["missing"]}; '
+                      f'conflicts={item["conflicts"]}; excluded={item.get("excluded")}; '
+                      f'unavailable={item.get("unavailable")}; copy={entry.get("last_preserved_copy")}')
             if (root/'journal.json').exists(): print(f'Recovery pending: {root/"journal.json"}')
             return
         if args.command == 'scan':
@@ -160,11 +176,34 @@ def main(argv=None):
                 if args.command == 'rename': rename_entry(state, source, args.name)
                 else: rebind_entry(config, state, source, args.new_source)
                 save_json(root/'state.json', state)
+            elif args.command in ('retire', 'resume'):
+                engine = Synchronizer(root, config, state)
+                engine.set_policy(args.sources, 'retired' if args.command == 'retire' else 'managed')
+                for key in args.sources:
+                    print(f'{key}: {state["notes"][key]["sync_policy"]}; {engine.observations[key]}')
+            elif args.command == 'resolve':
+                engine = Synchronizer(root, config, state)
+                requests = engine.resolution_requests(args.sources, args.choice, args.restore_missing)
+                for key, request in requests.items():
+                    print(f'{key}: {args.choice}; missing={sorted(request["missing"])}')
+                if not args.yes:
+                    if not sys.stdin.isatty():
+                        raise ValueError('noninteractive conflict resolution requires --yes')
+                    if input('Apply to these inspected Vault files? [y/N] ').strip().lower() != 'y':
+                        return
+                engine.resolutions.update(requests)
+                engine.run(only_sources=requests)
+                for key in requests:
+                    entry = state['notes'][key]
+                    print(f'{key}: {entry["status"]}; copy={entry.get("last_preserved_copy")}; '
+                          f'managed={key in engine.resolution_done}; {entry.get("error")}')
+                if set(requests) != engine.resolution_done:
+                    parser.exit(1, 'Some conflict resolutions failed or were deferred.\n')
             elif args.command in ('run','watch'):
                 if args.workers is not None: config = dict(config, workers=args.workers)
                 engine = Synchronizer(root, config, state)
                 restore = set(getattr(args, 'restore_missing', None) or [])
-                if any(key not in state['notes'] or not state['notes'][key].get('success') for key in restore):
+                if any(key not in state['notes'] or (not state['notes'][key].get('success') or state['notes'][key].get('sync_policy') == 'retired') for key in restore):
                     raise ValueError('restore requires registered documents with successful output history')
                 engine.restore_targets.update(restore)
                 if args.refresh: engine.refresh.update(restore or state['notes'])
@@ -174,7 +213,7 @@ def main(argv=None):
                     engine.run(watch=args.command == 'watch', stop_event=stop, only_sources=restore or None)
                 finally:
                     signal.signal(signal.SIGINT, previous)
-                if args.command == 'run' and any(e['status'] not in ('synced', 'excluded') for key, e in state['notes'].items() if not restore or key in restore):
+                if args.command == 'run' and any(e['status'] not in ('synced', 'excluded') for key, e in state['notes'].items() if (not restore or key in restore) and e.get('sync_policy', 'managed') != 'retired'):
                     parser.exit(1, 'Some notes are pending, missing, conflicting or failed; see sync status.\n')
             elif args.command == 'recover':
                 print('Recovery complete.')

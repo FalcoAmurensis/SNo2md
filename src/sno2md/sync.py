@@ -18,7 +18,7 @@ from .catalog import read_catalog, note_title
 from .folder_selection import inventory, selection_for, enabled
 from .locations import require_separate
 from .model import GENERATOR_VERSION
-from .sync_storage import MissingOutput, Conflict, check_outputs, file_digest, publish_pair, recover, save_json, store_lock
+from .sync_storage import MissingOutput, Conflict, check_outputs, file_digest, publish_pair, recover, save_json, store_lock, output_paths
 
 
 class InputChanged(OSError):
@@ -141,6 +141,8 @@ def registration(path, catalog, state):
 def rename_entry(state, source, name):
     valid_name(name)
     entry = state['notes'][source]
+    if entry.get('sync_policy', 'managed') == 'retired':
+        raise Conflict('resume document management before renaming')
     if any(key != source and other['name'].casefold() == name.casefold()
            for key, other in state['notes'].items()):
         raise Conflict('output name already registered')
@@ -155,7 +157,8 @@ def rename_entry(state, source, name):
 def rebind_entry(config, state, old, new):
     if old == new:
         return
-    if new in state['notes'] and state['notes'][new].get('success'):
+    if new in state['notes'] and (state['notes'][new].get('success') or
+                                  state['notes'][new].get('sync_policy') == 'retired'):
         raise Conflict('new source already has successful outputs; no automatic merging')
     source_path(config, new)
     found = discover(config['backup'])
@@ -176,13 +179,107 @@ class Synchronizer:
         self.refresh = set()
         self.restore_targets = set()
         self.restore_missing = {}
+        self.resolutions = {}
+        self.resolution_done = set()
+        self.observations = {}
         self.retry_after = {}
         self.options = {'width_scale': config['width_scale']}
         self.metrics = {}
 
     def notify(self):
         if self.on_state is not None:
-            self.on_state(deepcopy(self.state))
+            snapshot = deepcopy(self.state)
+            snapshot['observations'] = deepcopy(self.observations)
+            self.on_state(snapshot)
+
+    def inspect(self, found=None, folders=None):
+        from .sync_observation import observe, group
+        if (self.root/'journal.json').exists():
+            self.observations = {key: {'source_exists': None, 'missing': [], 'conflicts': {},
+                                       'unavailable': 'publication recovery pending; observations are unknown',
+                                       'group': group(entry, {})}
+                                 for key, entry in self.state['notes'].items()}
+        else:
+            self.observations = observe(self.config, self.state, found, folders)
+        self.notify()
+        return self.observations
+
+    def set_policy(self, sources, policy):
+        # Caller holds store_lock, just as run/rename/rebind do.
+        if policy not in ('managed', 'retired'):
+            raise ValueError('unknown synchronization policy')
+        recover(self.root, self.config, self.state)
+        targets = set(sources)
+        if targets - self.state['notes'].keys():
+            raise ValueError('source is not registered')
+        self.inspect()
+        previous = deepcopy(self.state)
+        for key in targets:
+            self.state['notes'][key]['sync_policy'] = policy
+        try:
+            save_json(self.root/'state.json', self.state)
+        except BaseException:
+            self.state.clear()
+            self.state.update(previous)
+            raise
+        self.inspect()
+
+    def resolution_requests(self, sources, choice, restore=False, observations=None):
+        """Prepare confirmation tokens without granting permission or changing files."""
+        if choice not in ('preserve-vault', 'use-source'):
+            raise ValueError('unknown conflict choice')
+        observations = self.inspect() if observations is None else observations
+        requests = {}
+        for key in sources:
+            entry = self.state['notes'].get(key)
+            item = observations.get(key, {})
+            if not entry or not entry.get('success'):
+                raise Conflict(f'{key}: successful history required')
+            if entry.get('sync_policy') == 'retired' or item.get('excluded'):
+                raise Conflict(f'{key}: resume management and include its folder first')
+            if item.get('unavailable') or not item.get('source_exists'):
+                raise Conflict(f'{key}: source/Vault unavailable')
+            if set(item['conflicts']) != {'md'} or not item.get('md_hash'):
+                raise Conflict(f'{key}: requires a regular Markdown conflict only')
+            if choice == 'use-source' and not item['md_resolvable']:
+                raise Conflict(f'{key}: user region cannot be identified; preserve the Vault copy')
+            if item['missing'] and not restore:
+                raise MissingOutput(f'{key}: explicitly authorize missing outputs: {item["missing"]}')
+            from .sync_config import pair_key
+            requests[key] = {'choice': choice, 'hash': item['md_hash'], 'pair': pair_key(self.config),
+                             'missing': frozenset(item['missing'])}
+        return requests
+
+    def preserve_copy(self, key, request):
+        from datetime import datetime
+        from .markdown_regions import digest
+        entry = self.state['notes'][key]
+        path = output_paths(self.config, entry)['md']
+        if file_digest(path) != request['hash']:
+            raise Conflict('Vault Markdown changed since confirmation; confirm again')
+        data = path.read_bytes()
+        if digest(data) != request['hash']:
+            raise Conflict('Vault Markdown changed while reading')
+        stem = path.stem + '.vault-copy-' + datetime.now().strftime('%Y%m%d-%H%M%S')
+        number = 1
+        while True:
+            suffix = '' if number == 1 else f'-{number}'
+            copy = path.with_name(stem + suffix + '.md')
+            try:
+                stream = copy.open('xb')
+                break
+            except FileExistsError:
+                number += 1
+        with stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if file_digest(copy) != request['hash']:
+            raise Conflict(f'preserved copy verification failed: {copy}')
+        entry['last_preserved_copy'] = str(copy)
+        save_json(self.root/'state.json', self.state)
+        self.emit(f'preserved: {key} -> {copy}')
+        self.notify()
 
     def status(self, key, status, message=None):
         entry = self.state['notes'][key]
@@ -210,6 +307,7 @@ class Synchronizer:
         # A failed attempt never grants a later automatic retry restoration rights.
         self.restore_targets.discard(key)
         self.restore_missing.pop(key, None)
+        self.resolutions.pop(key, None)
         if (self.root/'journal.json').exists():
             raise error
         if isinstance(error, InputChanged):
@@ -298,7 +396,10 @@ class Synchronizer:
                         # publish_pair repeats ownership/user-edit checks immediately before writing.
                         self.measured('publish', publish_pair, self.root, self.config, self.state,
                                       key, Path(result['output']), value, self.options,
-                                      self.restore_missing.get(key, False))
+                                      self.restore_missing.get(key, False), self.resolutions.get(key))
+                        if key in self.resolutions:
+                            self.resolution_done.add(key)
+                        self.resolutions.pop(key, None)
                         self.refresh.discard(key)
                         self.restore_targets.discard(key)
                         self.restore_missing.pop(key, None)
@@ -347,13 +448,17 @@ class Synchronizer:
                     state['notes'][key] = registration(path, catalog, state)
                     save_json(self.root/'state.json', state)
                     self.emit(f'registered: {key} -> {state["notes"][key]["name"]}')
-        self.notify()
+        self.inspect(found, folders)
         candidates = []
         for key, entry in list(state['notes'].items()):
             if stop_event.is_set():
                 break
             category = folders['membership'].get(key, entry.get('selection_folder', 'root'))
             entry['selection_folder'] = category
+            if entry.get('sync_policy', 'managed') == 'retired':
+                self.observed.pop(key, None)
+                self.retry_after.pop(key, None)
+                continue
             if not enabled(folders['tree'], rules, category):
                 self.observed.pop(key, None)
                 self.retry_after.pop(key, None)
@@ -363,7 +468,10 @@ class Synchronizer:
                 continue
             if key not in found:
                 self.observed.pop(key, None)
-                self.status(key, 'missing', 'source unavailable; existing outputs retained')
+                observation = self.observations[key]
+                conflicts = observation.get('conflicts', {})
+                self.status(key, 'conflict' if conflicts else ('missing_output' if observation['missing'] else 'missing'),
+                            '; '.join(conflicts.values()) if conflicts else 'source unavailable; existing outputs retained')
                 continue
             owners = [k for k, e in state['notes'].items()
                       if (e.get('folder', '').casefold(), e['name'].casefold()) ==
@@ -385,8 +493,16 @@ class Synchronizer:
                 if now - last[1] < config['settle_seconds']:
                     self.status(key, 'waiting', 'stability interval not reached')
                     continue
-                missing = self.measured('check_outputs', check_outputs, config, entry,
-                                        key in self.restore_targets)
+                request = self.resolutions.get(key)
+                allowed = request['missing'] if request else key in self.restore_targets
+                missing = self.measured('check_outputs', check_outputs, config, entry, allowed, request)
+                if request:
+                    if missing != request['missing']:
+                        raise Conflict('missing output paths changed since confirmation')
+                    if request['choice'] == 'preserve-vault':
+                        self.preserve_copy(key, request)
+                    self.restore_missing[key] = request['missing']
+                    self.refresh.add(key)
                 if key in self.restore_targets:
                     self.restore_missing[key] = frozenset(missing)
                 success = entry.get('success', {})
@@ -411,6 +527,21 @@ class Synchronizer:
             self.emit('timing: '+json.dumps(self.metrics))
 
     def run(self, watch=False, stop_event=None, only_sources=None):
+        try:
+            from .sync_config import pair_key
+            if any(request['pair'] != pair_key(self.config) for request in self.resolutions.values()):
+                raise Conflict('backup/Vault selection changed since confirmation')
+            if any(key not in self.state['notes'] or self.state['notes'][key].get('sync_policy') == 'retired'
+                   for key in self.restore_targets):
+                raise Conflict('restore requires registered documents with active management')
+            return self._run(watch, stop_event, only_sources)
+        finally:
+            self.restore_targets.clear()
+            self.restore_missing.clear()
+            self.resolutions.clear()
+            self.inspect()
+
+    def _run(self, watch=False, stop_event=None, only_sources=None):
         stop_event = stop_event if stop_event is not None else Event()
         only_sources = None if only_sources is None else set(only_sources)
         waiting_seconds = 0.0
@@ -423,7 +554,7 @@ class Synchronizer:
                 self.emit(f'unavailable: {error}; will retry')
             if not watch:
                 waiting = [key for key, e in self.state['notes'].items()
-                           if (only_sources is None or key in only_sources) and e['status'] == 'waiting']
+                           if (only_sources is None or key in only_sources) and e.get('sync_policy', 'managed') != 'retired' and e['status'] == 'waiting']
                 if not waiting or stop_event.is_set():
                     return
                 timeout = self.config.get('wait_timeout', 300.0)

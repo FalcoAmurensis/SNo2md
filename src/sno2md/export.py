@@ -2,6 +2,7 @@
 import json
 import re
 from urllib.parse import quote
+from .markdown_regions import create
 from .handwriting import page_handwriting
 from .model import MARKDOWN_SCHEMA, GENERATOR_VERSION, RenderError
 
@@ -51,4 +52,7 @@ def render_markdown(note, pdf_name, backgrounds, engine):
             if text.strip():
                 title = '원본 PDF 내용' if len(sources) == 1 else f'원본 PDF {index} · {source["source_pdf_page"]}페이지'
                 md.extend([f'### {title}\n', nested_headings(text).strip() + '\n'])
-    return '\n'.join(md)
+    try:
+        return create(md[0].encode('utf-8'), '\n'.join(md[1:]).encode('utf-8')).decode('utf-8')
+    except ValueError as error:
+        raise RenderError(str(error)) from error

@@ -8,6 +8,7 @@ from threading import Event, Thread
 
 from .locations import obsidian_vaults, samsung_locations
 from .sync import Synchronizer, rename_entry
+from .sync_observation import describe
 from .sync_config import create_config, load_config, load_state, new_config, update_config, change_paths
 from .sync_storage import Conflict, recover, store_lock
 
@@ -58,7 +59,8 @@ class DesktopController:
     def initialize(self):
         if (self.root/'config.json').exists():
             self.events.put(('config', load_config(self.root)))
-            self.state(load_state(self.root))
+            config, state = load_config(self.root), load_state(self.root)
+            Synchronizer(self.root, config, state, on_state=self.state).inspect()
         candidates = {'backup': [], 'vault': []}
         for key, function in (('backup', samsung_locations), ('vault', obsidian_vaults)):
             try:
@@ -99,30 +101,101 @@ class DesktopController:
                 raise
             state = load_state(self.root)
         self.events.put(('config', config))
-        self.state(state)
+        Synchronizer(self.root, config, state, on_state=self.state).inspect()
         self.log('설정을 저장했습니다.')
 
-    def synchronize(self, watch=False, only_sources=None, restore_sources=None):
+    def synchronize(self, watch=False, only_sources=None, restore_sources=None, restore_skipped=()):
         with store_lock(self.root):
             config, state = load_config(self.root), load_state(self.root)
             engine = Synchronizer(self.root, config, state, emit=self.log, on_state=self.state)
             if restore_sources:
-                if watch or any(key not in state['notes'] or not state['notes'][key].get('success') for key in restore_sources):
+                if watch or any(key not in state['notes'] or (not state['notes'][key].get('success') or state['notes'][key].get('sync_policy') == 'retired') for key in restore_sources):
                     raise ValueError('restore requires registered documents with successful output history')
                 engine.restore_targets.update(restore_sources)
                 only_sources = set(restore_sources)
-            self.state(state)
+            engine.inspect()
             engine.run(watch=watch, stop_event=self.stop_event, only_sources=only_sources)
-            self.state(state)
+            engine.inspect()
+            if restore_sources:
+                results = list(restore_skipped)
+                for key in sorted(restore_sources):
+                    entry = state['notes'][key]
+                    item = engine.observations[key]
+                    message = ('폴더 선택에서 제외됨' if item.get('excluded') else
+                               '원본 없음: 다시 생성할 수 없음' if not item.get('source_exists') else
+                               entry.get('error') or '사용자 메모 보존 · 자동 관리 중')
+                    results.append({'source': key, 'status': entry['status'], 'message': message})
+                self.events.put(('results', results))
 
     def start(self, watch=False, only_sources=None):
         self.launch(lambda: self.synchronize(watch, only_sources), kind='watch' if watch else 'sync')
 
-    def restore(self, sources):
+    def restore(self, sources, skipped=()):
         targets = {sources} if isinstance(sources, str) else set(sources)
         if not targets:
             raise ValueError('select at least one document to restore')
-        self.launch(lambda: self.synchronize(restore_sources=targets), kind='sync')
+        self.launch(lambda: self.synchronize(restore_sources=targets, restore_skipped=skipped), kind='sync')
+
+    def policy(self, sources, policy):
+        def action():
+            with store_lock(self.root):
+                config, state = load_config(self.root), load_state(self.root)
+                engine = Synchronizer(self.root, config, state, emit=self.log, on_state=self.state)
+                results = []
+                try:
+                    engine.set_policy(sources, policy)
+                    for key in sorted(sources):
+                        results.append({'source': key, 'status': '관리 중단' if policy == 'retired' else '관리 재개', 'message': describe(engine.observations[key])})
+                except (OSError, ValueError) as error:
+                    results = [{'source': key, 'status': 'failed', 'message': str(error)} for key in sorted(sources)]
+                self.events.put(('results', results))
+        self.launch(action, kind='policy')
+
+    def prepare_resolution(self, sources):
+        def action():
+            with store_lock(self.root):
+                config, state = load_config(self.root), load_state(self.root)
+                recover(self.root, config, state)
+                engine = Synchronizer(self.root, config, state, emit=self.log, on_state=self.state)
+                offers, skipped = {}, []
+                observations = engine.inspect()
+                for key in sorted(sources):
+                    try:
+                        request = engine.resolution_requests({key}, 'preserve-vault', restore=True, observations=observations)[key]
+                        request['use_source'] = engine.observations[key]['md_resolvable']
+                        offers[key] = request
+                    except (OSError, ValueError) as error:
+                        skipped.append({'source': key, 'status': 'deferred', 'message': str(error)})
+                self.events.put(('resolution_offer', (offers, skipped)))
+        self.launch(action, kind='inspect')
+
+    def resolve(self, requests, skipped=()):
+        def action():
+            with store_lock(self.root):
+                config, state = load_config(self.root), load_state(self.root)
+                recover(self.root, config, state)
+                engine = Synchronizer(self.root, config, state, emit=self.log, on_state=self.state)
+                results = list(skipped)
+                for key, request in requests.items():
+                    try:
+                        # Validate confirmation tokens, policy and folder selection again.
+                        current = engine.resolution_requests({key}, request['choice'], restore=True)[key]
+                        if (current['hash'] != request['hash'] or current['missing'] != request['missing']
+                                or current['pair'] != request['pair']):
+                            raise Conflict('Vault files changed since confirmation; confirm again')
+                        engine.resolutions[key] = request
+                        engine.run(stop_event=self.stop_event, only_sources={key})
+                        entry = state['notes'][key]
+                        results.append({'source': key, 'status': ('synced' if key in engine.resolution_done else
+                                                                'deferred' if entry['status'] in ('synced', 'pending', 'waiting', 'excluded')
+                                                                else entry['status']),
+                                        'message': entry.get('error') or ('자동 관리 중' if key in engine.resolution_done else '보류'),
+                                        'copy': entry.get('last_preserved_copy')})
+                    except (OSError, ValueError) as error:
+                        results.append({'source': key, 'status': 'failed', 'message': str(error),
+                                        'copy': state['notes'].get(key, {}).get('last_preserved_copy')})
+                self.events.put(('results', results))
+        self.launch(action, kind='sync')
 
     def stop(self):
         self.stop_event.set()

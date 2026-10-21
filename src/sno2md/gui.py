@@ -7,9 +7,10 @@ import sys
 
 from .desktop import DesktopController
 from .locations import state_directory
+from .sync_observation import GROUPS, group, describe
 
 
-STATUS = {'missing_output': '삭제됨', 'excluded': '동기화 제외', 'pending': '대기', 'waiting': '입력 안정화 대기', 'converting': '변환 중',
+STATUS = {'deferred': '보류', 'failed': '실패', 'missing_output': 'Vault 파일 없음', 'excluded': '동기화 제외', 'pending': '대기', 'waiting': '입력 안정화 대기', 'converting': '변환 중',
           'queued': '변환 순서 대기', 'ready_to_publish': '저장 대기', 'synced': '완료', 'missing': '원본 없음', 'conflict': '충돌', 'error': '실패'}
 RETRYABLE = {'error', 'conflict', 'missing', 'pending', 'waiting'}
 
@@ -23,6 +24,10 @@ class Application:
         self.startup = startup
         self.config = None
         self.notes = {}
+        self.observations = {}
+        self.group = 'active'
+        self.pending_offer = None
+        self.resolution_view = None
         self.folder_drafts = {}
         self.folder_reviewed = set()
         self.folder_dialog = None
@@ -92,6 +97,13 @@ class Application:
         ttk.Label(body, textvariable=self.banner, wraplength=800).grid(row=5, column=0, columnspan=4, sticky='w', pady=(0, 8))
         table = ttk.Frame(body)
         table.grid(row=6, column=0, columnspan=4, sticky='nsew')
+        filters = ttk.Frame(table)
+        filters.pack(side='top', fill='x', pady=(0, 5))
+        self.group_buttons = {}
+        for key, label in GROUPS.items():
+            button = ttk.Button(filters, text=label, command=lambda key=key: self.change_group(key))
+            button.pack(side='left', padx=(0, 5))
+            self.group_buttons[key] = button
         self.tree = ttk.Treeview(table, columns=('check', 'name', 'status', 'source'), show='headings', selectmode='browse')
         self.tree.heading('check', text='☐', command=self.toggle_all_checked)
         self.tree.column('check', width=42, minwidth=42, stretch=False, anchor='center')
@@ -113,6 +125,10 @@ class Application:
         self.restore_button.pack(side='left', padx=7)
         self.rename_button = ttk.Button(footer, text='출력 이름 변경', command=self.rename)
         self.rename_button.pack(side='left', padx=7)
+        self.policy_button = ttk.Button(footer, text='관리 중단', command=self.policy)
+        self.policy_button.pack(side='left', padx=5)
+        self.resolve_button = ttk.Button(footer, text='충돌 해결', command=self.resolve)
+        self.resolve_button.pack(side='left', padx=5)
         ttk.Button(footer, text='오류 / 로그 보기', command=self.details).pack(side='right')
         ttk.Label(body, text='창을 닫으면 트레이에서 계속 실행됩니다. 종료는 트레이 메뉴를 이용하세요.', foreground='#666666').grid(row=8, column=0, columnspan=4, sticky='w', pady=(12, 0))
         window.protocol('WM_DELETE_WINDOW', self.hide)
@@ -127,10 +143,22 @@ class Application:
         selected = self.tree.selection()
         return self.tree_keys.get(selected[0]) if selected else None
 
+    def change_group(self, value):
+        self.group = value
+        self.checked.clear()
+        self.update_state({'notes': self.notes, 'observations': self.observations})
+
+    def observation(self, key):
+        entry = self.notes[key]
+        return self.observations.get(key, {'source_exists': False if entry['status'] == 'missing' else None,
+                                          'missing': ['pdf', 'md'] if entry['status'] == 'missing_output' else [],
+                                          'excluded': entry['status'] == 'excluded'})
+
     def checked_targets(self, statuses=None):
         visible = set(self.tree_keys.values())
         return {key for key in self.checked & visible
-                if statuses is None or self.notes[key]['status'] in statuses}
+                if (statuses is None or self.notes[key]['status'] in statuses)
+                and (statuses is None or self.notes[key].get('sync_policy') != 'retired')}
 
     def single_target(self):
         targets = self.checked_targets()
@@ -172,7 +200,7 @@ class Application:
 
     def controls(self):
         busy = self.controller.busy
-        idle = self.initialized and not busy and not self.closing and self.folder_dialog is None
+        idle = self.initialized and not busy and not self.closing and self.folder_dialog is None and self.resolution_view is None
         for widget in (self.save_button, self.width_box, self.startup_box):
             widget.configure(state='normal' if idle else 'disabled')
         self.select_folders_button.configure(state='normal' if idle else 'disabled')
@@ -188,10 +216,14 @@ class Application:
                                     state='normal' if not self.closing and not stopping and (idle and self.config or busy and self.controller.kind in ('watch','sync')) else 'disabled')
         key = self.single_target()
         retry = self.checked_targets(RETRYABLE)
-        restore = self.checked_targets({'missing_output'})
-        self.rename_button.configure(state='normal' if idle and key else 'disabled')
+        restore = self.restore_targets()
+        managed = key and self.notes[key].get('sync_policy') != 'retired'
+        self.rename_button.configure(state='normal' if idle and managed else 'disabled')
+        self.policy_button.configure(text='관리 재개' if self.group == 'retired' else '관리 중단',
+                                     state='normal' if idle and self.checked_targets() else 'disabled')
+        self.resolve_button.configure(state='normal' if idle and self.checked_targets() and self.group != 'retired' else 'disabled')
         self.retry_button.configure(text=f'체크 문서 재시도 ({len(retry)})', state='normal' if idle and retry else 'disabled')
-        self.restore_button.configure(text=f'누락 파일 재생성 ({len(restore)})', state='normal' if idle and restore else 'disabled')
+        self.restore_button.configure(text=f'Vault에 다시 저장 ({len(restore)})', state='normal' if idle and restore else 'disabled')
         if self.tray:
             self.tray.watching = busy and self.controller.kind in ('watch','sync')
 
@@ -277,7 +309,7 @@ class Application:
         self.controls()
 
     def toggle(self):
-        if self.folder_dialog: return
+        if self.folder_dialog or self.resolution_view: return
         if self.controller.busy:
             if self.controller.kind in ('watch','sync'):
                 self.controller.stop()
@@ -297,23 +329,105 @@ class Application:
         targets = self.checked_targets(RETRYABLE)
         if targets: self.sync_once(targets)
 
+    def restore_targets(self):
+        return {key for key in self.checked_targets() if self.observation(key).get('missing')
+                and self.observation(key).get('source_exists') is True
+                and not self.observation(key).get('excluded')
+                and not self.observation(key).get('unavailable')
+                and self.notes[key].get('sync_policy') != 'retired'}
+
     def restore(self):
         from tkinter import messagebox
-        targets = self.checked_targets({'missing_output'})
+        targets = self.restore_targets()
         if self.controller.busy or self.folder_dialog or not targets: return
         if not self.paths_saved(): return
         names = [self.notes[key]['name'] for key in sorted(targets)]
         preview = '\n'.join(names[:8])
         if len(names) > 8: preview += f'\n외 {len(names)-8}개'
-        skipped = len(self.checked_targets()) - len(targets)
-        message = (f'삭제됨으로 표시된 문서 {len(targets)}개의 PDF·MD를 다시 생성할까요?\n\n'
-                   + preview + '\n\n남아 있는 파일이 수정됐다면 해당 문서는 복원하지 않습니다.')
-        if skipped: message += f'\n삭제됨 상태가 아닌 {skipped}개는 제외합니다.'
-        if messagebox.askyesno('누락 파일 재생성', message, parent=self.window):
+        skipped_keys = self.checked_targets() - targets
+        skipped = len(skipped_keys)
+        message = (f'선택 문서 {len(targets)}개의 PDF·MD를 현재 삼성노트 원본으로 다시 생성할까요?\n\n'
+                   + preview + '\n\n사용자 메모는 보존합니다. 생성 영역이나 PDF에 수정이 있으면 중단합니다.')
+        if skipped: message += f'\n원본 없음·누락 없음·관리 중단 등 복원 불가 문서 {skipped}개는 제외합니다.'
+        if messagebox.askyesno('Vault에 다시 저장', message, parent=self.window):
             self.failed = False
-            self.controller.restore(targets)
+            if skipped_keys:
+                reasons = [{'source': key, 'status': 'deferred', 'message': '복원 대상에서 제외: ' + describe(self.observation(key))}
+                           for key in sorted(skipped_keys)]
+                self.controller.restore(targets, reasons)
+            else:
+                self.controller.restore(targets)
             self.banner.set(f'체크한 {len(targets)}개 문서의 누락 파일을 재생성하는 중…')
             self.controls()
+
+    def policy(self):
+        from tkinter import messagebox
+        targets = self.checked_targets()
+        if not targets or self.controller.busy or not self.paths_saved(): return
+        policy = 'managed' if self.group == 'retired' else 'retired'
+        message = ('관리 재개는 파일을 생성하지 않습니다. 누락 파일은 Vault에 다시 저장으로 처리하세요.'
+                   if policy == 'managed' else '남은 파일과 성공 이력은 보존하며 자동 변환을 중단합니다.')
+        if messagebox.askyesno('관리 재개' if policy == 'managed' else '관리 중단',
+                              f'선택 문서 {len(targets)}개\n\n{message}', parent=self.window):
+            self.controller.policy(targets, policy)
+            self.controls()
+
+    def resolve(self):
+        targets = self.checked_targets()
+        if targets and not self.controller.busy and self.paths_saved():
+            self.controller.prepare_resolution(targets)
+            self.controls()
+
+    def resolution_dialog(self, offers, skipped):
+        if not offers:
+            self.results_dialog(skipped)
+            return
+        view = self.tk.Toplevel(self.window)
+        self.resolution_view = view
+        self.controls()
+        view.title('생성 영역 충돌 해결')
+        view.transient(self.window)
+        view.grab_set()
+        choice = self.tk.StringVar(value='preserve-vault')
+        text = (f'{len(offers)}개 문서의 현재 Vault 수정본을 확인했습니다.\n'
+                '보관 후 재개를 권장합니다. 사용자 메모는 유지합니다.\n'
+                '구형 문서·경계 손상 문서는 전체 수정본을 보관하고 메모를 직접 옮겨야 합니다.\n\n')
+        text += '\n'.join(f'{key}: 누락 {", ".join(sorted(r["missing"])) or "없음"}' for key, r in offers.items())
+        if skipped:
+            text += '\n\n제외: ' + '; '.join(f'{r["source"]}: {r["message"]}' for r in skipped)
+        self.ttk.Label(view, text=text, wraplength=680).pack(padx=18, pady=12)
+        self.ttk.Radiobutton(view, text='Vault 수정본 보관 후 재개 (권장)', variable=choice,
+                             value='preserve-vault').pack(anchor='w', padx=18)
+        self.ttk.Radiobutton(view, text='삼성노트 버전 사용', variable=choice, value='use-source',
+                             state='normal' if all(r['use_source'] for r in offers.values()) else 'disabled').pack(anchor='w', padx=18)
+        def close():
+            self.resolution_view = None
+            view.destroy()
+            self.controls()
+        view.protocol('WM_DELETE_WINDOW', close)
+        def apply():
+            requests = {key: dict(r, choice=choice.get()) for key, r in offers.items()}
+            close()
+            self.controller.resolve(requests, skipped)
+            self.controls()
+        label = '선택 적용 및 누락 파일 재생성 동의' if any(r['missing'] for r in offers.values()) else '선택 적용'
+        self.ttk.Button(view, text=label, command=apply).pack(padx=18, pady=10)
+        self.ttk.Button(view, text='나중에 결정', command=close).pack(pady=(0, 12))
+
+    def results_dialog(self, results):
+        view = self.tk.Toplevel(self.window)
+        view.title('일괄 처리 결과')
+        text = self.tk.Text(view, width=90, height=16, wrap='word')
+        text.pack(padx=12, pady=12)
+        for result in results:
+            text.insert('end', f'{result["source"]}: {STATUS.get(result["status"], result["status"])}\n{result.get("message", "")}\n')
+            if result.get('copy'):
+                path = result['copy']
+                text.insert('end', f'보존본: {path}\n')
+                self.ttk.Button(view, text=f'파일 위치 열기: {Path(path).name}',
+                                command=lambda path=path: os.startfile(str(Path(path).parent))).pack(padx=12, pady=4)
+            text.insert('end', '\n')
+        text.configure(state='disabled')
 
     def rename(self):
         from tkinter import simpledialog
@@ -343,6 +457,12 @@ class Application:
         text.pack(fill='both', expand=True, padx=12, pady=12)
         keys = self.checked_targets() or ({self.selected()} if self.selected() else set())
         for key in sorted(keys):
+            text.insert('end', f'{key}\n정책: {"관리 중단" if self.notes[key].get("sync_policy") == "retired" else "관리 중"}\n{describe(self.observation(key))}\n')
+            copy = self.notes[key].get('last_preserved_copy')
+            if copy:
+                text.insert('end', f'최근 보존본: {copy}\n')
+                self.ttk.Button(view, text='보존본 파일 위치 열기',
+                                command=lambda copy=copy: os.startfile(str(Path(copy).parent))).pack()
             if self.notes[key].get('error'):
                 text.insert('end', f'{key}\n{self.notes[key]["error"]}\n\n')
         text.insert('end', '\n'.join(self.log_lines) or '기록된 오류가 없습니다.')
@@ -352,14 +472,31 @@ class Application:
     def update_state(self, state):
         selected = self.selected()
         self.notes = state['notes']
+        self.observations = state.get('observations', {})
         self.tree.delete(*self.tree.get_children())
         self.tree_keys.clear()
-        self.checked.intersection_update(key for key, entry in self.notes.items() if entry['status'] != 'excluded')
+        counts = {key: 0 for key in GROUPS}
+        visible = []
+        for key, entry in self.notes.items():
+            observation = self.observation(key)
+            category = group(entry, observation)
+            if observation.get('excluded') and category != 'retired': continue
+            counts[category] += 1
+            if category == self.group: visible.append(key)
+        self.checked.intersection_update(visible)
+        for key, button in self.group_buttons.items():
+            button.configure(text=f'{GROUPS[key]} ({counts[key]})')
         for number, (key, entry) in enumerate(self.notes.items()):
-            if entry['status'] == 'excluded': continue
+            if key not in visible: continue
+            observation = self.observation(key)
+            label = STATUS.get(entry['status'], entry['status'])
+            if observation.get('missing'): label += ' · ' + '/'.join(observation['missing']) + ' 없음'
+            if observation.get('source_exists') is False and entry['status'] != 'missing': label += ' · 원본 없음'
+            if observation.get('conflicts') and entry['status'] != 'conflict': label += ' · 충돌'
+            if observation.get('unavailable'): label += ' · 관찰 미확인'
             iid = str(number)
             self.tree_keys[iid] = key
-            self.tree.insert('', 'end', iid=iid, values=('☑' if key in self.checked else '☐', '/'.join(p for p in (entry.get('folder', ''), entry['name']) if p), STATUS.get(entry['status'], entry['status']), key))
+            self.tree.insert('', 'end', iid=iid, values=('☑' if key in self.checked else '☐', '/'.join(p for p in (entry.get('folder', ''), entry['name']) if p), label, key))
             if key == selected: self.tree.selection_set(iid)
         self.refresh_checks()
         converting = [e['name'] for e in self.notes.values() if e['status'] == 'converting']
@@ -370,8 +507,17 @@ class Application:
         elif (converting or ready or queued) and self.controller.busy:
             self.banner.set(f'변환 작업 {len(converting)}개 · 순서 대기 {queued}개 · 저장 대기 {ready}개')
         elif self.controller.busy and self.controller.kind == 'watch' and not self.controller.stop_event.is_set():
-            issues = sum(e['status'] in ('error', 'conflict', 'missing', 'missing_output') for e in self.notes.values())
-            self.banner.set(f'백업 감시 중 · 확인할 문서 {issues}개' if issues else '백업 감시 중…')
+            issues = self.issue_summary()
+            self.banner.set(f'백업 감시 중 · {issues}' if issues else '백업 감시 중…')
+
+    def issue_summary(self):
+        entries = [(entry, self.observation(key)) for key, entry in self.notes.items()
+                   if entry.get('sync_policy') != 'retired' and not self.observation(key).get('excluded')]
+        missing = sum(bool(item.get('missing')) or item.get('source_exists') is False for _, item in entries)
+        errors = sum(bool(item.get('conflicts')) or entry['status'] in ('error', 'conflict') for entry, item in entries)
+        pending = sum(entry['status'] in ('waiting', 'pending') for entry, _ in entries)
+        unknown = sum(bool(item.get('unavailable')) for _, item in entries)
+        return f'누락 {missing}개 · 오류/충돌 {errors}개 · 대기 {pending}개 · 미확인 {unknown}개' if missing or errors or pending or unknown else ''
 
     def show(self):
         self.window.deiconify()
@@ -394,6 +540,9 @@ class Application:
         self.show()
 
     def exit(self):
+        if self.resolution_view:
+            self.resolution_view.destroy()
+            self.resolution_view = None
         if self.folder_dialog: self.folder_dialog.close()
         self.closing = True
         self.controller.stop()
@@ -421,6 +570,8 @@ class Application:
                     self.backup_box.configure(values=value['backup'])
                     self.vault_box.configure(values=value['vault'])
                 elif kind == 'state': self.update_state(value)
+                elif kind == 'resolution_offer': self.pending_offer = value
+                elif kind == 'results': self.results_dialog(value)
                 elif kind == 'log':
                     self.log_lines.append(value)
                     self.log_lines = self.log_lines[-100:]
@@ -437,11 +588,15 @@ class Application:
                             self.window.after(100, self.toggle)
                         elif self.startup: self.show()
                     if not self.failed and not self.closing:
-                        issues = sum(e['status'] in ('error','conflict','missing','missing_output','waiting','pending') for e in self.notes.values())
-                        self.banner.set(f'대기 중 · 확인할 문서 {issues}개' if issues else '대기 중')
+                        issues = self.issue_summary()
+                        self.banner.set(f'대기 중 · {issues}' if issues else '대기 중')
         except Empty:
             pass
         self.controls()
+        if self.pending_offer is not None and not self.controller.busy and not self.closing:
+            offers, skipped = self.pending_offer
+            self.pending_offer = None
+            self.resolution_dialog(offers, skipped)
         if self.closing and not self.controller.busy:
             if self.tray: self.tray.close()
             self.controller.close()

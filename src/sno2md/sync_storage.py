@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import tempfile
 from .model import GENERATOR_VERSION
+from .markdown_regions import split, digest
 
 
 class Conflict(ValueError):
@@ -100,29 +101,60 @@ def output_paths(config, entry):
     return {ext: parent/(name+'.'+ext) for ext in ('pdf', 'md')}
 
 
-def check_outputs(config, entry, allow_missing=False):
+def inspect_outputs(config, entry):
+    """Collect absence and conflicts independently; retain bytes only within this check."""
+    result = {'hashes': {}, 'missing': [], 'conflicts': {}, 'md_parts': None}
     expected = entry.get('success', {}).get('outputs', {})
-    missing = set()
-
     for ext, path in output_paths(config, entry).items():
-        current = file_digest(path)
-        recorded = expected.get(ext)
+        try:
+            current = file_digest(path)
+            result['hashes'][ext] = current
+            recorded = expected.get(ext)
+            if current is None:
+                if recorded is not None:
+                    result['missing'].append(ext)
+                continue
+            if ext == 'md':
+                data = path.read_bytes()
+                if digest(data) != current:
+                    raise Conflict(f'output changed while reading: {path}')
+                try:
+                    result['md_parts'] = split(data)
+                except ValueError:
+                    pass
+                managed = entry.get('success', {}).get('md_managed_hash')
+                if managed:
+                    if result['md_parts'] is None:
+                        raise Conflict('Markdown boundaries damaged; preserve the complete Vault copy before resuming')
+                    if digest(result['md_parts'][0]) != managed:
+                        raise Conflict('Markdown generated region changed')
+                    continue
+            if current != recorded:
+                raise Conflict(f'output changed or occupied: {path}')
+        except Conflict as error:
+            result['conflicts'][ext] = str(error)
+    return result
 
-        if current == recorded:
-            continue
 
-        if current is None and recorded is not None:
-            missing.add(ext)
-            continue
+def check_outputs(config, entry, allow_missing=False, resolution=None):
+    return validate_outputs(inspect_outputs(config, entry), entry, allow_missing, resolution)
 
-        raise Conflict(f'output changed or occupied: {path}')
 
+def validate_outputs(result, entry, allow_missing=False, resolution=None):
+    conflicts = dict(result['conflicts'])
+    if resolution is not None:
+        if result['hashes'].get('md') != resolution['hash']:
+            raise Conflict('Vault Markdown changed since confirmation; confirm again')
+        if resolution['choice'] == 'use-source' and (not result['md_parts'] or
+                not entry.get('success', {}).get('md_managed_hash')):
+            raise Conflict('cannot identify user region; preserve the complete Vault copy instead')
+        conflicts.pop('md', None)
+    if conflicts:
+        raise Conflict('; '.join(conflicts.values()))
+    missing = set(result['missing'])
     permitted = {'pdf', 'md'} if allow_missing is True else (set(allow_missing) if allow_missing else set())
     if missing - permitted:
-        raise MissingOutput(
-            f'managed output missing: {", ".join(sorted(missing))}'
-        )
-
+        raise MissingOutput(f'managed output missing: {", ".join(sorted(missing))}')
     return missing
 
 
@@ -176,14 +208,21 @@ def recover(root, config, state):
     shutil.rmtree(stage)
 
 
-def publish_pair(root, config, state, source, generated, fingerprint, options, allow_missing=False):
+def publish_pair(root, config, state, source, generated, fingerprint, options, allow_missing=False, resolution=None):
     entry = state['notes'][source]
-    missing = check_outputs(config, entry, allow_missing=allow_missing)
+    if entry.get('sync_policy', 'managed') == 'retired':
+        raise Conflict('document management is stopped')
+    if resolution is not None:
+        from .sync_config import pair_key
+        if resolution['pair'] != pair_key(config):
+            raise Conflict('backup/Vault selection changed since confirmation')
+    inspection = inspect_outputs(config, entry)
+    missing = validate_outputs(inspection, entry, allow_missing, resolution)
     if isinstance(allow_missing, (set, frozenset)) and missing != allow_missing:
         raise Conflict('missing output paths changed during conversion; retry explicitly')
     paths = output_paths(config, entry)
     paths['pdf'].parent.mkdir(parents=True, exist_ok=True)
-    old = dict(entry.get('success', {}).get('outputs', {}))
+    old = dict(inspection['hashes'])
     for ext in missing:
         old[ext] = None  # Rollback must restore absence, not resurrect a deleted file.
     stage = Path(tempfile.mkdtemp(prefix='.sno2md-sync-', dir=config['vault']))
@@ -196,6 +235,17 @@ def publish_pair(root, config, state, source, generated, fingerprint, options, a
         for ext, path in paths.items():
             new = stage/'new'/path.name
             shutil.copyfile(generated/path.name, new)
+            if ext == 'md':
+                data = new.read_bytes()
+                try:
+                    managed, user = split(data)
+                except ValueError as error:
+                    raise Conflict('new Markdown has invalid generated boundaries') from error
+                current_parts = inspection['md_parts']
+                trusted = entry.get('success', {}).get('md_managed_hash')
+                if current_parts and trusted:
+                    user = current_parts[1]
+                new.write_bytes(managed + user)
             with new.open('r+b') as stream:
                 os.fsync(stream.fileno())
             hashes[ext] = file_digest(new)
@@ -210,6 +260,7 @@ def publish_pair(root, config, state, source, generated, fingerprint, options, a
                    'generator_version': GENERATOR_VERSION,
                    'input': fingerprint, 'options': options, 'outputs': hashes,
                    'at': datetime.now(timezone.utc).isoformat()}
+        success['md_managed_hash'] = digest(split((stage/'new'/paths['md'].name).read_bytes())[0])
         journal = {'source': source, 'name': entry['name'], 'folder': entry.get('folder', ''), 'stage': str(stage),
                    'old': old, 'success': success}
         save_json(journal_path, journal)
