@@ -58,8 +58,15 @@ def check_state(tree, rules, key):
 
 
 def summary(rules):
-    base = '전체 포함' if rules.get(ROOT, True) else '전체 제외'
-    return base + f' · 개별 규칙 {len(rules) - int(ROOT in rules)}개'
+    base = rules.get(ROOT, True)
+    overrides = {key: value for key, value in rules.items() if key != ROOT}
+    if not base:
+        return '선택한 범위만 가져오기' if any(overrides.values()) else '가져올 폴더 없음'
+    if not overrides:
+        return '모든 폴더 (휴지통 포함)'
+    if overrides == {TRASH: False}:
+        return '모든 폴더 (휴지통 제외)'
+    return '전체 폴더 · 일부 제외' if not all(overrides.values()) else '모든 폴더 (휴지통 포함)'
 
 
 def inventory(backup, found=None):

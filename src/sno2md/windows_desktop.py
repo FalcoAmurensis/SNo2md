@@ -65,11 +65,19 @@ class WindowsTray:
         self.error = None
         self.visible = False
         self.watching = False
+        self.busy = False
+        self.stopping = False
         self.callback_message = win32con.WM_USER + 20
         self.show_message = win32gui.RegisterWindowMessage('SNo2md.ShowWindow')
         self.taskbar_message = win32gui.RegisterWindowMessage('TaskbarCreated')
         self.mutex = win32event.CreateMutex(None, False, MUTEX_NAME)
         self.is_owner = win32api.GetLastError() != 183
+
+    def toggle_state(self):
+        if self.stopping: return '중지 중', False
+        if self.watching: return '자동 동기화 중지', True
+        if self.busy: return '작업 중', False
+        return '자동 동기화 시작', True
 
     def activate_existing(self):
         # The first instance may still be creating its message window.
@@ -106,7 +114,9 @@ class WindowsTray:
                 menu = gui.CreatePopupMenu()
                 try:
                     gui.AppendMenu(menu, con.MF_STRING, 1, '열기')
-                    gui.AppendMenu(menu, con.MF_STRING, 2, '감시 중지' if self.watching else '감시 시작')
+                    label, enabled = self.toggle_state()
+                    flags = con.MF_STRING | (0 if enabled else con.MF_GRAYED)
+                    gui.AppendMenu(menu, flags, 2, label)
                     gui.AppendMenu(menu, con.MF_SEPARATOR, 0, '')
                     gui.AppendMenu(menu, con.MF_STRING, 3, '종료')
                     gui.SetForegroundWindow(hwnd)
@@ -116,7 +126,7 @@ class WindowsTray:
                     gui.DestroyMenu(menu)
         elif message == con.WM_COMMAND:
             command = {1: 'show', 2: 'toggle', 3: 'exit'}.get(wparam & 0xffff)
-            if command:
+            if command and (command != 'toggle' or self.toggle_state()[1]):
                 self.callback(command)
         elif message == con.WM_QUERYENDSESSION:
             self.callback('session_end')

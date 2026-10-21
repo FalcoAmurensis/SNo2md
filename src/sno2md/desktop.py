@@ -38,6 +38,12 @@ class DesktopController:
     def state(self, value):
         self.events.put(('state', deepcopy(value)))
 
+    def results(self, results):
+        for result in results:
+            self.logger.info('result: %s: %s — %s; copy=%s', result.get('source'), result.get('status'),
+                             result.get('message', ''), result.get('copy'))
+        self.events.put(('results', results))
+
     def launch(self, action, kind='settings'):
         if self.busy:
             raise Conflict('another desktop operation is running')
@@ -104,6 +110,11 @@ class DesktopController:
         Synchronizer(self.root, config, state, on_state=self.state).inspect()
         self.log('설정을 저장했습니다.')
 
+    def save_and_sync(self, *values):
+        self.save_settings(*values)
+        if not self.stop_event.is_set():
+            self.synchronize()
+
     def synchronize(self, watch=False, only_sources=None, restore_sources=None, restore_skipped=()):
         with store_lock(self.root):
             config, state = load_config(self.root), load_state(self.root)
@@ -116,16 +127,16 @@ class DesktopController:
             engine.inspect()
             engine.run(watch=watch, stop_event=self.stop_event, only_sources=only_sources)
             engine.inspect()
-            if restore_sources:
+            if restore_sources or only_sources is not None:
                 results = list(restore_skipped)
-                for key in sorted(restore_sources):
+                for key in sorted(restore_sources or only_sources):
                     entry = state['notes'][key]
                     item = engine.observations[key]
                     message = ('폴더 선택에서 제외됨' if item.get('excluded') else
                                '원본 없음: 다시 생성할 수 없음' if not item.get('source_exists') else
                                entry.get('error') or '사용자 메모 보존 · 자동 관리 중')
                     results.append({'source': key, 'status': entry['status'], 'message': message})
-                self.events.put(('results', results))
+                self.results(results)
 
     def start(self, watch=False, only_sources=None):
         self.launch(lambda: self.synchronize(watch, only_sources), kind='watch' if watch else 'sync')
@@ -148,7 +159,7 @@ class DesktopController:
                         results.append({'source': key, 'status': '관리 중단' if policy == 'retired' else '관리 재개', 'message': describe(engine.observations[key])})
                 except (OSError, ValueError) as error:
                     results = [{'source': key, 'status': 'failed', 'message': str(error)} for key in sorted(sources)]
-                self.events.put(('results', results))
+                self.results(results)
         self.launch(action, kind='policy')
 
     def prepare_resolution(self, sources):
@@ -194,8 +205,15 @@ class DesktopController:
                     except (OSError, ValueError) as error:
                         results.append({'source': key, 'status': 'failed', 'message': str(error),
                                         'copy': state['notes'].get(key, {}).get('last_preserved_copy')})
-                self.events.put(('results', results))
+                self.results(results)
         self.launch(action, kind='sync')
+
+    def diagnose_paths(self, keys=(), selected_paths=None, tk_version=None):
+        from .path_diagnostics import diagnose
+        def action():
+            report = diagnose(self.root, load_config(self.root), keys, selected_paths, self.stop_event, tk_version)
+            self.events.put(('diagnostics', report))
+        self.launch(action, kind='diagnostics')
 
     def stop(self):
         self.stop_event.set()
