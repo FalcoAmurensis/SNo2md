@@ -11,7 +11,7 @@ class SettingsDialog:
         from tkinter import ttk
         self.app = app
         self.window = tk.Toplevel(app.window)
-        self.window.title('설정 변경' if app.config else '처음 설정')
+        self.window.title('설정' if app.config else '처음 설정')
         self.window.geometry('640x500')
         self.window.minsize(480, 360)
         self.window.transient(app.window)
@@ -19,9 +19,9 @@ class SettingsDialog:
         config = app.config or {}
         self.backup = PathStringVar(self.window, config.get('backup', ''))
         self.vault = PathStringVar(self.window, config.get('vault', ''))
-        self.width = tk.StringVar(value=str(config.get('width_scale', 0.5)))
-        self.workers = tk.StringVar(value='자동 (권장)' if config.get('workers', 'auto') == 'auto' else str(config['workers']))
-        self.autostart = tk.BooleanVar(value=config.get('start_on_login', True))
+        self.width = tk.StringVar(self.window, value=str(config.get('width_scale', 0.5)))
+        self.workers = tk.StringVar(self.window, value='자동 (권장)' if config.get('workers', 'auto') == 'auto' else str(config['workers']))
+        self.autostart = tk.BooleanVar(self.window, value=config.get('start_on_login', True))
         self.rules = {}
         self.reviewed = set(config.get('folder_selections', {}))
         self.folder_dialog = None
@@ -29,64 +29,130 @@ class SettingsDialog:
         self.save_pending = False
         self.advanced_open = False
         self.folder_summary = NFCStringVar(self.window)
-        message = '삼성노트가 저장한 백업을 가져옵니다. 앱 자체를 직접 동기화하지 않습니다.'
-        if not config:
-            message += '\n로그인 자동 시작은 기본으로 켜져 있습니다. 고급 설정에서 변경할 수 있습니다.'
-        self.message = NFCStringVar(self.window, message)
+        self.message = NFCStringVar(self.window)
         self.initial = self.snapshot()
-        canvas = tk.Canvas(self.window, highlightthickness=0, width=1)
-        scroll = ttk.Scrollbar(self.window, command=canvas.yview)
+        self.window.columnconfigure(0, weight=1); self.window.rowconfigure(1, weight=1)
+        self.header = ttk.Frame(self.window, padding=(14, 10))
+        self.header.grid(row=0, column=0, sticky='ew')
+        ttk.Label(self.header, text='설정' if config else '처음 설정').pack(anchor='w')
+        center = ttk.Frame(self.window); center.grid(row=1, column=0, sticky='nsew')
+        center.columnconfigure(0, weight=1); center.rowconfigure(0, weight=1)
+        self.canvas = canvas = tk.Canvas(center, highlightthickness=0, width=1)
+        self.scroll = scroll = ttk.Scrollbar(center, command=canvas.yview)
         canvas.configure(yscrollcommand=scroll.set)
-        scroll.pack(side='right', fill='y'); canvas.pack(fill='both', expand=True)
+        scroll.grid(row=0, column=1, sticky='ns'); canvas.grid(row=0, column=0, sticky='nsew')
         self.body = body = ttk.Frame(canvas, padding=14)
         content = canvas.create_window((0, 0), window=body, anchor='nw')
-        canvas.bind('<Configure>', lambda e: canvas.itemconfigure(content, width=e.width))
-        body.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+        self.content = content
+        self.scroll_job = None
+        canvas.bind('<Configure>', self.queue_scroll)
+        body.bind('<Configure>', self.queue_scroll)
         body.columnconfigure(0, weight=1)
-        ttk.Label(body, text='삼성노트 백업').grid(row=0, column=0, sticky='w')
+        def wrapped(parent, text=None, variable=None):
+            label = ttk.Label(parent, text=text, textvariable=variable, width=1, wraplength=430)
+            label.bind('<Configure>', lambda e: label.configure(wraplength=max(100, e.width)))
+            return label
+        ttk.Label(body, text='일반').grid(row=0, column=0, sticky='w', pady=(0, 10))
+        ttk.Label(body, text='삼성노트 백업').grid(row=1, column=0, sticky='w')
+        self.backup_row = backup_row = ttk.Frame(body); backup_row.grid(row=2, column=0, sticky='ew', pady=4)
+        backup_row.columnconfigure(0, weight=1)
         self.backup_candidates = list(app.locations.get('backup', []))
-        self.backup_box = ttk.Combobox(body, textvariable=self.backup, values=[display(p) for p in self.backup_candidates], width=1)
+        self.backup_box = ttk.Combobox(backup_row, textvariable=self.backup, values=[display(p) for p in self.backup_candidates], width=1)
         self.backup_box.bind('<<ComboboxSelected>>', lambda e: self.backup.set(self.backup_candidates[self.backup_box.current()]))
-        self.backup_box.grid(row=1, column=0, sticky='ew', pady=4)
-        backup_actions = ttk.Frame(body); backup_actions.grid(row=2, column=0, sticky='w')
-        self.folder_button = ttk.Button(backup_actions, text='폴더 선택', command=lambda: self.browse('backup'))
-        self.folder_button.pack(side='left')
-        self.file_button = ttk.Button(backup_actions, text='SDOCX 파일 선택', command=lambda: self.browse('file'))
-        self.file_button.pack(side='left', padx=6)
-        ttk.Label(body, text='저장 폴더/Vault').grid(row=3, column=0, sticky='w', pady=(12, 0))
+        self.backup_box.grid(row=0, column=0, sticky='ew')
+        self.folder_button = ttk.Button(backup_row, text='폴더…', command=lambda: self.browse('backup'))
+        self.folder_button.grid(row=0, column=1, padx=(4, 0))
+        self.file_button = ttk.Button(backup_row, text='SDOCX…', command=lambda: self.browse('file'))
+        self.file_button.grid(row=0, column=2, padx=(4, 0))
+        wrapped(body, text='삼성노트가 저장한 백업을 가져옵니다.').grid(row=3, column=0, sticky='ew', pady=(0, 6))
+        ttk.Label(body, text='저장 폴더/Vault').grid(row=4, column=0, sticky='w', pady=(6, 0))
+        self.vault_row = vault_row = ttk.Frame(body); vault_row.grid(row=5, column=0, sticky='ew', pady=4)
+        vault_row.columnconfigure(0, weight=1)
         self.vault_candidates = list(app.locations.get('vault', []))
-        self.vault_box = ttk.Combobox(body, textvariable=self.vault, values=[display(p) for p in self.vault_candidates], width=1)
+        self.vault_box = ttk.Combobox(vault_row, textvariable=self.vault, values=[display(p) for p in self.vault_candidates], width=1)
         self.vault_box.bind('<<ComboboxSelected>>', lambda e: self.vault.set(self.vault_candidates[self.vault_box.current()]))
-        self.vault_box.grid(row=4, column=0, sticky='ew', pady=4)
-        self.vault_button = ttk.Button(body, text='저장 폴더 선택', command=lambda: self.browse('vault'))
-        self.vault_button.grid(row=5, column=0, sticky='w')
-        ttk.Label(body, text='Obsidian Vault 또는 일반 폴더를 선택할 수 있습니다.', wraplength=430).grid(row=6, column=0, sticky='w', pady=6)
-        self.select_folders_button = ttk.Button(body, text='가져올 폴더 선택', command=self.choose_folders)
-        self.select_folders_button.grid(row=7, column=0, sticky='w', pady=(8, 0))
-        ttk.Label(body, textvariable=self.folder_summary, wraplength=430).grid(row=8, column=0, sticky='w', pady=5)
+        self.vault_box.grid(row=0, column=0, sticky='ew')
+        self.vault_button = ttk.Button(vault_row, text='찾아보기…', command=lambda: self.browse('vault'))
+        self.vault_button.grid(row=0, column=1, padx=(4, 0))
+        ttk.Label(body, text='가져올 폴더').grid(row=6, column=0, sticky='w', pady=(10, 0))
+        folder_row = ttk.Frame(body); folder_row.grid(row=7, column=0, sticky='ew', pady=4)
+        folder_row.columnconfigure(0, weight=1)
+        wrapped(folder_row, variable=self.folder_summary).grid(row=0, column=0, sticky='ew')
+        self.select_folders_button = ttk.Button(folder_row, text='변경…', command=self.choose_folders)
+        self.select_folders_button.grid(row=0, column=1, padx=(4, 0))
+        self.startup_box = ttk.Checkbutton(body, text='Windows 로그인 시 자동 동기화', variable=self.autostart)
+        self.startup_box.grid(row=8, column=0, sticky='w', pady=(8, 0))
+        wrapped(body, text='현재 세션의 자동 동기화는 별도로 시작합니다.').grid(row=9, column=0, sticky='ew', pady=4)
+        ttk.Separator(body).grid(row=10, column=0, sticky='ew', pady=8)
         self.advanced_button = ttk.Button(body, text='고급 설정 펼치기', command=self.toggle_advanced)
-        self.advanced_button.grid(row=9, column=0, sticky='w', pady=8)
+        self.advanced_button.grid(row=11, column=0, sticky='w', pady=(0, 8))
         self.advanced = ttk.Frame(body)
         ttk.Label(self.advanced, text='필기 선 굵기 (기본값 0.5)').grid(row=0, column=0, sticky='w')
         self.width_box = ttk.Entry(self.advanced, textvariable=self.width, width=7)
         self.width_box.grid(row=0, column=1, padx=8)
-        ttk.Label(self.advanced, text='작을수록 필기 선이 가늘어집니다.').grid(row=1, column=0, columnspan=2, sticky='w')
+        wrapped(self.advanced, text='작을수록 필기 선이 가늘어집니다.').grid(row=1, column=0, columnspan=2, sticky='ew')
         ttk.Label(self.advanced, text='동시 처리할 노트 수').grid(row=2, column=0, sticky='w', pady=6)
         self.workers_box = ttk.Combobox(self.advanced, textvariable=self.workers, values=('자동 (권장)', *range(1, 9)), width=12, state='readonly')
         self.workers_box.grid(row=2, column=1)
-        self.startup_box = ttk.Checkbutton(self.advanced, text='로그인할 때 자동 동기화 시작', variable=self.autostart)
-        self.startup_box.grid(row=3, column=0, columnspan=2, sticky='w')
-        ttk.Label(self.advanced, text='Windows 로그인 후 앱을 실행하고 백업 변경을 확인합니다.\n현재 세션의 자동 동기화는 별도로 시작합니다.', wraplength=430).grid(row=4, column=0, columnspan=2, sticky='w', pady=4)
-        ttk.Label(body, textvariable=self.message, wraplength=430).grid(row=11, column=0, sticky='ew', pady=10)
-        actions = ttk.Frame(body); actions.grid(row=12, column=0, sticky='ew')
-        self.save_button = ttk.Button(actions, text='설정 저장' if app.config else '저장하고 지금 동기화', command=self.save)
-        self.save_button.pack(side='left')
-        self.cancel_button = ttk.Button(actions, text='취소', command=self.close)
-        self.cancel_button.pack(side='left', padx=8)
+        self.notice = ttk.Frame(center, padding=(14, 6))
+        self.notice.columnconfigure(0, weight=1)
+        wrapped(self.notice, variable=self.message).grid(row=0, column=0, sticky='ew')
+        self.message.trace_add('write', self.update_notice)
+        self.footer = footer = ttk.Frame(self.window, padding=(14, 8))
+        footer.grid(row=2, column=0, sticky='ew')
+        self.save_button = ttk.Button(footer, text='설정 저장' if app.config else '저장하고 지금 동기화', command=self.save)
+        self.save_button.pack(side='right')
+        self.cancel_button = ttk.Button(footer, text='취소', command=self.close)
+        self.cancel_button.pack(side='right', padx=(0, 8))
         self.window.protocol('WM_DELETE_WINDOW', self.close)
         self.backup.trace_add('write', lambda *_: self.update_summary())
         self.vault.trace_add('write', lambda *_: self.update_summary())
+        def focus_scroll(event):
+            canvas.update_idletasks()
+            top = event.widget.winfo_rooty() - body.winfo_rooty()
+            height = max(1, body.winfo_height())
+            first, last = canvas.yview()
+            if top < first*height: canvas.yview_moveto(top/height)
+            elif top + event.widget.winfo_height() > last*height:
+                canvas.yview_moveto((top + event.widget.winfo_height() - canvas.winfo_height())/height)
+        def bind_focus(widget):
+            widget.bind('<FocusIn>', focus_scroll, add=True)
+            widget.bind('<Configure>', self.queue_scroll, add=True)
+            if not isinstance(widget, ttk.Combobox): widget.bind('<MouseWheel>', self.scroll_wheel, add=True)
+            for child in widget.winfo_children(): bind_focus(child)
+        bind_focus(body)
+        canvas.bind('<MouseWheel>', self.scroll_wheel)
         self.update_summary()
+        self.queue_scroll()
+
+    def update_notice(self, *_):
+        if self.message.get(): self.notice.grid(row=1, column=0, columnspan=2, sticky='ew')
+        else: self.notice.grid_remove()
+
+    def queue_scroll(self, event=None):
+        if self.scroll_job is None:
+            self.scroll_job = self.window.after_idle(self.update_scroll)
+
+    def update_scroll(self):
+        self.scroll_job = None
+        width, height = self.canvas.winfo_width(), self.canvas.winfo_height()
+        self.canvas.itemconfigure(self.content, width=width)
+        required = self.body.winfo_reqheight()
+        overflow = required > height
+        if overflow:
+            if not self.scroll.winfo_manager(): self.scroll.grid(row=0, column=1, sticky='ns')
+        else:
+            if self.scroll.winfo_manager():
+                self.scroll.grid_remove()
+                # Reassert the viewport after changing grid columns during map.
+                self.canvas.grid()
+            self.canvas.yview_moveto(0)
+        self.canvas.itemconfigure(self.content, height=max(required, height))
+        self.canvas.configure(scrollregion=self.canvas.bbox('all'))
+
+    def scroll_wheel(self, event):
+        if self.scroll.winfo_manager(): self.canvas.yview_scroll(-int(event.delta/120), 'units')
+        return 'break'
 
     def snapshot(self):
         return (self.backup.get(), self.vault.get(), self.width.get(), self.workers.get(), self.autostart.get(), deepcopy(self.rules))
@@ -103,9 +169,10 @@ class SettingsDialog:
 
     def toggle_advanced(self):
         self.advanced_open = not self.advanced_open
-        if self.advanced_open: self.advanced.grid(row=10, column=0, sticky='ew')
+        if self.advanced_open: self.advanced.grid(row=12, column=0, sticky='ew')
         else: self.advanced.grid_remove()
         self.advanced_button.configure(text='고급 설정 접기' if self.advanced_open else '고급 설정 펼치기')
+        self.queue_scroll()
 
     def browse(self, kind):
         from tkinter import filedialog
@@ -174,6 +241,9 @@ class SettingsDialog:
             # Suppress auto-save callbacks while discarding or ending the session.
             self.save_pending = False
             self.folder_dialog.close()
+        if self.scroll_job is not None:
+            self.window.after_cancel(self.scroll_job)
+            self.scroll_job = None
         self.window.grab_release(); self.window.destroy()
         self.app.settings_dialog = None
         self.app.controls()

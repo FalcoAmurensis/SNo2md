@@ -6,8 +6,8 @@ STATUS = {'deferred': '보류', 'failed': '처리 실패', 'missing_output': '�
           'converting': '문서 변환 중', 'queued': '처리 순서 대기', 'ready_to_publish': '파일 저장 대기',
           'synced': '최신 상태', 'missing': '백업에서 찾을 수 없음', 'conflict': '수정 확인 필요', 'error': '처리 실패',
           'managed': '관리 재개', 'retired': '관리 중단'}
-GROUPS = {'active': '동기화 문서', 'source_missing': '백업에서 찾을 수 없음',
-          'output_missing': '저장 폴더/Vault 파일 없음', 'retired': '관리 중단'}
+GROUPS = {'active': '내 문서', 'source_missing': '원본 없음',
+          'output_missing': '저장 파일 없음', 'retired': '관리 중단'}
 FILTERS = ('전체', '최신 상태', '대기·진행 중', '확인 필요')
 PENDING = {'pending', 'waiting', 'queued', 'converting', 'ready_to_publish'}
 RETRYABLE = {'error', 'conflict', 'missing', 'pending', 'waiting'}
@@ -29,6 +29,23 @@ def close_action(busy, kind, stopping, tray):
 def needs_attention(entry, item):
     return bool(item.get('missing') or item.get('conflicts') or item.get('unavailable') or
                 item.get('source_exists') is False or entry.get('status') in ('missing', 'missing_output', 'conflict', 'error'))
+
+
+def document_summary(notes, observations):
+    """Presentation counts from existing observations; never infer fresh I/O success."""
+    visible = [(entry, observations.get(key, {})) for key, entry in notes.items()
+               if not observations.get(key, {}).get('excluded') or entry.get('sync_policy') == 'retired']
+    managed = [(entry, item) for entry, item in visible
+               if entry.get('sync_policy', 'managed') == 'managed' and not item.get('excluded')]
+    return {'total': len(visible),
+            'attention': sum(needs_attention(entry, item) for entry, item in managed),
+            'pending': sum(entry.get('status') in PENDING for entry, _ in managed),
+            'processing': any(entry.get('status') in ('converting', 'ready_to_publish') for entry, _ in managed),
+            'unavailable': sum(bool(item.get('unavailable')) for _, item in managed),
+            'all_current': bool(visible) and len(managed) == len(visible) and all(
+                entry.get('status') == 'synced' and item.get('source_exists') is True
+                and {'missing', 'conflicts'} <= item.keys() and not needs_attention(entry, item)
+                for entry, item in managed)}
 
 
 def matches(key, entry, item, query, state_filter):
