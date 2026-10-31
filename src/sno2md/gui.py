@@ -60,9 +60,8 @@ class Application:
         self.header = header = ttk.Frame(body); header.grid(row=0, column=0, sticky='ew')
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text='SNo2md', style='Title.TLabel').grid(row=0, column=0, sticky='w')
-        ttk.Label(header, textvariable=self.run_label).grid(row=0, column=1, padx=8)
         self.settings_button = ttk.Button(header, text='설정', command=self.edit_settings)
-        self.settings_button.grid(row=0, column=2, padx=(4, 0))
+        self.settings_button.grid(row=0, column=1, padx=(4, 0))
         self.global_menu = tk.Menu(window, tearoff=False, postcommand=self.controls)
         self.global_menu.add_command(label='전역 진단·로그', command=lambda: self.details(global_view=True))
         self.global_menu.add_command(label='경로 진단', command=lambda: self.diagnose_paths(set()))
@@ -70,16 +69,16 @@ class Application:
         self.global_menu.add_separator()
         self.global_menu.add_command(label='창 닫기 동작 안내', command=self.explain_close)
         self.global_more = ttk.Menubutton(header, text='메뉴', menu=self.global_menu)
-        self.global_more.grid(row=0, column=3, padx=(4, 0))
+        self.global_more.grid(row=0, column=2, padx=(4, 0))
         self.command_frame = actions = ttk.Frame(body); actions.grid(row=1, column=0, sticky='ew', pady=(8, 6))
-        actions.columnconfigure(2, weight=1)
+        actions.columnconfigure(3, weight=1)
         self.once_button = ttk.Button(actions, text='지금 동기화', command=self.sync_once)
         self.watch_button = ttk.Button(actions, text='자동 동기화 시작', command=self.toggle)
         self.open_button = ttk.Button(actions, text='Vault 열기', command=self.open_vault)
         self.run_buttons = (self.once_button, self.watch_button, self.open_button)
         self.once_button.grid(row=0, column=0, padx=(0, 4))
         self.watch_button.grid(row=0, column=1)
-        self.open_button.grid(row=0, column=3, padx=(4, 0))
+        self.open_button.grid(row=0, column=2, padx=(4, 0))
         self.filter_area = filter_area = ttk.Frame(body); filter_area.grid(row=2, column=0, sticky='ew')
         filter_area.columnconfigure(1, weight=1)
         self.groups_frame = ttk.Frame(filter_area); self.groups_frame.grid(row=0, column=0, columnspan=3, sticky='ew', pady=(0, 6))
@@ -132,12 +131,14 @@ class Application:
         self.action_more = ttk.Menubutton(self.action_frame, text='기타 작업', menu=self.action_menu)
         self.groups_frame.bind('<Configure>', lambda e: self.group_labels())
         self.status_frame = status = ttk.Frame(body); status.grid(row=5, column=0, sticky='ew', pady=(8, 0))
-        status.columnconfigure(0, weight=1)
+        status.columnconfigure(1, weight=1)
         self.banner_label = ttk.Label(status, textvariable=self.banner, width=1, anchor='w')
         self.banner_label.grid(row=0, column=0, columnspan=3, sticky='ew', pady=(0, 4))
         self.banner_label.bind('<Configure>', lambda e: self.banner_label.configure(wraplength=max(120, e.width)))
+        self.status_dot = ttk.Label(status, text='•', width=2, anchor='w')
+        self.status_dot.grid(row=1, column=0, sticky='nw')
         self.status_label = ttk.Label(status, textvariable=self.status_summary, width=1)
-        self.status_label.grid(row=1, column=0, columnspan=3, sticky='ew')
+        self.status_label.grid(row=1, column=1, columnspan=2, sticky='ew')
         self.status_label.bind('<Configure>', lambda e: self.update_status())
         self.banner.trace_add('write', self.update_banner)
         self.update_banner()
@@ -282,12 +283,21 @@ class Application:
     def update_status(self):
         import tkinter.font as font
         values = self.summary
+        mode = execution(self.controller.busy, self.controller.kind, self.controller.stop_event.is_set())
+        if self.failed or values['attention']:
+            self.status_indicator = 'red'
+        elif (not self.initialized or not self.config or values['pending']
+              or mode in ('working', 'stopping') or values['total'] and not values['all_current']):
+            self.status_indicator = 'yellow'
+        else:
+            self.status_indicator = 'green'
+        self.status_dot.configure(foreground={'green': '#22863a', 'yellow': '#b8860b', 'red': '#cb2431'}[self.status_indicator])
         self.attention_summary.set(f'확인 필요 {values["attention"]}개' if values['attention'] else '')
         parts = [self.run_label.get()]
         if values['attention']: parts.append(self.attention_summary.get())
         if values['pending']:
             parts.append(f'{"대기·진행" if values["processing"] else "처리 대기"} {values["pending"]}개')
-        elif values['all_current'] and not self.failed and execution(self.controller.busy, self.controller.kind, self.controller.stop_event.is_set()) in ('idle', 'watch'):
+        elif values['all_current'] and not self.failed and mode in ('idle', 'watch'):
             parts.append('모든 문서 최신 상태')
         parts.append(f'전체 {values["total"]}개')
         text = ' │ '.join(parts)
