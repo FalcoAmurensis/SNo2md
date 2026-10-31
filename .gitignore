@@ -30,6 +30,8 @@
 !/LICENSE
 !/src/LICENSE
 !/src/third_party/flatbuffers-LICENSE.txt
+!/src/third_party/sv-ttk-LICENSE.txt
+!/src/third_party/fluent-system-icons-LICENSE.txt
 !/src/third_party/pymupdf-COPYING.txt
 !/src/third_party/pymupdf4llm-COPYING.txt
 !/src/third_party/pymupdf-layout-COPYING.txt

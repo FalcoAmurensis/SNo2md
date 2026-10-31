@@ -301,6 +301,8 @@ python -m sno2md.gui
 
 `sno2md-gui` 명령으로도 실행 가능합니다.
 
+Windows UI는 Sun Valley ttk(sv-ttk) 테마를 사용합니다. 상단 **메뉴 → 라이트 테마 / 다크 테마**에서 전환할 수 있습니다. 선택한 테마는 현재 실행에만 적용되며 다음 실행은 라이트로 시작합니다.
+
 ## 변환이 오래 걸리거나 멈춘 것처럼 보일 때
 
 Markdown 엔진의 ONNX 대기 스레드는 기본적으로 **spinning을 사용하지 않습니다**. 별도 설정은 필요 없으며, 동시 변환 문서 수와 모델 내부 스레드 수는 기존 정책을 유지합니다.
@@ -327,7 +329,7 @@ SDOCX는 페이지 정보와 원본 PDF·이미지 등을 ZIP 형태로 묶은 �
 
 
 
-PDF 합성에는 pypdf, Markdown 추출에는 PyMuPDF4LLM·PyMuPDF·PyMuPDF Layout 1.28.2를 사용합니다. Windows 앱은 Tkinter/ttk와 pywin32로 구성됩니다.
+PDF 합성에는 pypdf, Markdown 추출에는 PyMuPDF4LLM·PyMuPDF·PyMuPDF Layout 1.28.2를 사용합니다. Windows 앱은 Tkinter/ttk, sv-ttk 2.6.1(MIT), pywin32로 구성됩니다.
 
 ## 라이선스와 소스 배포
 

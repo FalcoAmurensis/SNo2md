@@ -9,10 +9,10 @@ description = "Decode Samsung Notes SDOCX and export PDF and Markdown"
 requires-python = ">=3.10"
 license = "AGPL-3.0-only"
 dependencies = ["pypdf==6.20.1", "pymupdf4llm==1.28.2", "pymupdf==1.28.2", "pymupdf-layout==1.28.2"]
-license-files = ["LICENSE", "third_party/pypdf-LICENSE.txt", "third_party/flatbuffers-LICENSE.txt", "third_party/pymupdf-COPYING.txt", "third_party/pymupdf4llm-COPYING.txt", "third_party/pymupdf-layout-COPYING.txt"]
+license-files = ["LICENSE", "third_party/pypdf-LICENSE.txt", "third_party/flatbuffers-LICENSE.txt", "third_party/pymupdf-COPYING.txt", "third_party/pymupdf4llm-COPYING.txt", "third_party/pymupdf-layout-COPYING.txt", "third_party/sv-ttk-LICENSE.txt", "third_party/fluent-system-icons-LICENSE.txt"]
 
 [project.optional-dependencies]
-desktop = ["pywin32==312; sys_platform == 'win32'"]
+desktop = ["pywin32==312; sys_platform == 'win32'", "sv-ttk==2.6.1"]
 
 [project.scripts]
 sno2md = "sno2md.cli:main"

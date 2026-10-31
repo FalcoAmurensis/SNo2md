@@ -87,4 +87,12 @@ def ask_name(parent, initial):
         def apply(self):
             self.result = self.name.get()
 
+        def buttonbox(self):
+            box = ttk.Frame(self, padding=10)
+            ttk.Button(box, text='확인', style='Accent.TButton', command=self.ok).pack(side='right')
+            ttk.Button(box, text='취소', command=self.cancel).pack(side='right', padx=(0, 8))
+            self.bind('<Return>', self.ok)
+            self.bind('<Escape>', self.cancel)
+            box.pack(fill='x')
+
     return NameDialog(parent, '다른 이름으로 저장').result
