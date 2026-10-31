@@ -57,7 +57,7 @@ class SourceMarkdown:
         try:
             pymupdf, pymupdf4llm = load_engine()
         except ImportError as error:
-            raise RenderError("Markdown export requires pip install 'sno2md[markdown]'") from error
+            raise RenderError("Markdown engine dependencies are missing; reinstall the project's declared dependencies") from error
         self.note, self.pdf, self.engine = note, pymupdf, pymupdf4llm
         self.documents, self.pages = {}, {}
 

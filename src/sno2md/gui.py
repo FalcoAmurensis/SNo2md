@@ -11,6 +11,7 @@ from .locations import state_directory
 from .sync_observation import group
 from .gui_model import (STATUS, GROUPS, FILTERS, execution, close_action,
                         matches, targets, guidance, status_text)
+from .gui_text import NFCStringVar, NFCText, display, ask_name
 
 
 class Application:
@@ -33,16 +34,16 @@ class Application:
         self.selected_paths = {}
         self.closing = self.initialized = self.failed = False
         self.log_lines = []
-        self.search = tk.StringVar()
-        self.state_filter = tk.StringVar(value='전체')
-        self.banner = tk.StringVar(value='설정을 불러오는 중…')
-        self.run_label = tk.StringVar(value='작업 중')
-        self.close_hint = tk.StringVar()
-        self.selection_summary = tk.StringVar(value='선택 0개')
-        self.result_count = tk.StringVar()
-        self.backup_summary = tk.StringVar(value='삼성노트 백업: 설정이 필요합니다.')
-        self.vault_summary = tk.StringVar(value='저장 폴더/Vault: 설정이 필요합니다.')
-        self.folder_summary = tk.StringVar()
+        self.search = NFCStringVar(window)
+        self.state_filter = NFCStringVar(window, '전체')
+        self.banner = NFCStringVar(window, '설정을 불러오는 중…')
+        self.run_label = NFCStringVar(window, '작업 중')
+        self.close_hint = NFCStringVar(window)
+        self.selection_summary = NFCStringVar(window, '선택 0개')
+        self.result_count = NFCStringVar(window)
+        self.backup_summary = NFCStringVar(window, '삼성노트 백업: 설정이 필요합니다.')
+        self.vault_summary = NFCStringVar(window, '저장 폴더/Vault: 설정이 필요합니다.')
+        self.folder_summary = NFCStringVar(window)
         window.title('SNo2md — 삼성노트 동기화')
         window.geometry('1000x650'); window.minsize(700, 480)
         style = ttk.Style(window); style.theme_use('clam')
@@ -329,7 +330,7 @@ class Application:
                    + preview + '\n\n남아 있는 Markdown 사용자 영역은 유지합니다. 삭제된 메모나 과거 버전을 복구하는 기능은 아닙니다.\n'
                    '생성 영역이나 PDF가 바뀌었다면 해당 문서는 중단합니다.')
         if skipped: message += f'\n실행 조건에 맞지 않는 {len(skipped)}개는 결과에 제외 이유를 표시합니다.'
-        if messagebox.askyesno('저장 폴더/Vault에 다시 저장', message, parent=self.window):
+        if messagebox.askyesno('저장 폴더/Vault에 다시 저장', display(message), parent=self.window):
             self.failed = False
             self.controller.restore(accepted, skipped) if skipped else self.controller.restore(accepted)
             self.banner.set('현재 백업으로 누락 파일을 다시 만들고 있습니다.'); self.controls()
@@ -355,7 +356,7 @@ class Application:
 
     def text_area(self, parent, height=8):
         frame = self.ttk.Frame(parent)
-        text = self.tk.Text(frame, wrap='word', height=height, width=1, font=('맑은 고딕', 10))
+        text = NFCText(frame, wrap='word', height=height, width=1, font=('맑은 고딕', 10))
         scroll = self.ttk.Scrollbar(frame, command=text.yview)
         text.configure(yscrollcommand=scroll.set)
         text.pack(side='left', fill='both', expand=True); scroll.pack(side='right', fill='y')
@@ -419,7 +420,7 @@ class Application:
         scroll = self.ttk.Scrollbar(frame, command=tree.yview); tree.configure(yscrollcommand=scroll.set)
         tree.pack(side='left', fill='both', expand=True); scroll.pack(side='right', fill='y')
         for i, result in enumerate(results):
-            tree.insert('', 'end', iid=str(i), values=(self.notes.get(result['source'], {}).get('name', result['source']), STATUS.get(result['status'], result['status'])))
+            tree.insert('', 'end', iid=str(i), values=(display(self.notes.get(result['source'], {}).get('name', result['source'])), display(STATUS.get(result['status'], result['status']))))
         message_frame, message = self.text_area(view, height=3); message_frame.grid(row=2, column=0, sticky='ew', padx=12, pady=6)
         buttons = self.ttk.Frame(view); buttons.grid(row=3, column=0, sticky='ew', padx=12)
         def current():
@@ -458,14 +459,11 @@ class Application:
         self.last_results_view = view
 
     def rename(self):
-        from tkinter import simpledialog
         key = self.single_target()
         accepted, _ = self.action_targets('rename')
         if not key or key not in accepted or self.controller.busy or not self.paths_saved(): return
-        name = simpledialog.askstring('다른 이름으로 저장',
-                                     '새 파일 이름 (확장자 제외)\n기존 PDF·Markdown은 그대로 남고 새 이름이 관리 대상이 됩니다.\n기존 사용자 메모는 새 파일로 자동 이전되지 않습니다.',
-                                     initialvalue=self.notes[key]['name'], parent=self.window)
-        if name:
+        name = ask_name(self.window, self.notes[key]['name'])
+        if name and display(name) != display(self.notes[key]['name']):
             self.failed = False; self.controller.launch(lambda: self.controller.rename(key, name), kind='sync')
             self.banner.set('새 이름으로 저장할 준비를 하고 있습니다.')
         self.controls()
@@ -482,18 +480,21 @@ class Application:
         if not keys: text.insert('end', '문서를 선택하면 현상과 다음 조치를 볼 수 있습니다. 전체 기록은 기술 정보에서 확인하세요.')
         text.configure(state='disabled')
         technical, raw = self.text_area(view, height=8)
+        raw_parts = []
         for key in keys:
-            raw.insert('end', f'{key}\n{self.notes[key].get("error") or ""}\n{self.observation(key)}\n최근 보존본: {self.notes[key].get("last_preserved_copy")}\n\n')
+            raw_parts.append(f'{key}\n{self.notes[key].get("error") or ""}\n{self.observation(key)}\n최근 보존본: {self.notes[key].get("last_preserved_copy")}\n\n')
         if self.config:
-            raw.insert('end', f'삼성노트 백업: {self.config["backup"]}\n저장 폴더/Vault: {self.config["vault"]}\n\n')
-        raw.insert('end', '\n'.join(self.log_lines) + f'\n\n로그 파일: {self.controller.root/"desktop.log"}')
+            raw_parts.append(f'삼성노트 백업: {self.config["backup"]}\n저장 폴더/Vault: {self.config["vault"]}\n\n')
+        raw_parts.append('\n'.join(self.log_lines) + f'\n\n로그 파일: {self.controller.root/"desktop.log"}')
+        raw_technical = ''.join(raw_parts)
+        raw.insert('end', raw_technical)
         raw.configure(state='disabled')
         def toggle():
             if technical.winfo_manager(): technical.pack_forget()
             else: technical.pack(fill='both', expand=True, padx=12, pady=5)
         self.ttk.Button(view, text='기술 정보 펼치기/접기', command=toggle).pack(anchor='w', padx=12)
         tools = self.ttk.Frame(view); tools.pack(fill='x', padx=12, pady=8)
-        self.ttk.Button(tools, text='기술 정보 복사', command=lambda: self.copy_text(raw.get('1.0', 'end-1c'))).grid(row=0, column=0, sticky='ew')
+        self.ttk.Button(tools, text='기술 정보 복사', command=lambda: self.copy_text(raw_technical)).grid(row=0, column=0, sticky='ew')
         self.ttk.Button(tools, text='백업 내 경로 복사', command=lambda: self.copy_text('\n'.join(keys)), state='normal' if keys else 'disabled').grid(row=0, column=1, sticky='ew', padx=4)
         self.ttk.Button(tools, text='경로 진단', command=lambda: self.diagnose_paths(keys), state='normal' if self.config and not self.controller.busy else 'disabled').grid(row=1, column=0, sticky='ew', pady=4)
         copies = [{'source': key, 'status': 'synced', 'copy': self.notes[key]['last_preserved_copy']} for key in keys if self.notes[key].get('last_preserved_copy')]
@@ -540,7 +541,7 @@ class Application:
                 if iid not in visible_set: self.tree.delete(iid)
             for index, key in enumerate(visible):
                 entry = self.notes[key]
-                values = ('☑' if key in self.checked else '☐', '/'.join(p for p in (entry.get('folder', ''), entry['name']) if p), status_text(entry, self.observation(key)))
+                values = ('☑' if key in self.checked else '☐', display('/'.join(p for p in (entry.get('folder', ''), entry['name']) if p)), display(status_text(entry, self.observation(key))))
                 if self.tree.exists(key): self.tree.item(key, values=values); self.tree.move(key, '', index)
                 else: self.tree.insert('', 'end', iid=key, values=values)
             self.tree_keys = {key: key for key in visible}
@@ -683,7 +684,7 @@ def main(argv=None):
         if not args.startup or not tray or not tray.visible: window.deiconify()
         window.mainloop()
     except Exception as error:
-        messagebox.showerror('SNo2md 실행 오류', str(error), parent=window)
+        messagebox.showerror('SNo2md 실행 오류', display(error), parent=window)
         controller.stop()
         if controller.thread: controller.thread.join()
         if tray: tray.close()

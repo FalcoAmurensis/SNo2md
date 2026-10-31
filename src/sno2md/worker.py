@@ -16,7 +16,7 @@ def worker_count(value):
 
 def choose_workers(value, jobs):
     policy = worker_count(value)
-    # psutil is included by the Markdown engine. Remain usable without that extra.
+    # psutil is included by the Markdown engine; tolerate incomplete installations.
     try:
         import psutil
         available = psutil.virtual_memory().available

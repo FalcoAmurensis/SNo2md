@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 import tempfile
 from .model import GENERATOR_VERSION
-from .markdown_regions import split, digest
+from .markdown_regions import split, digest, merge
 
 
 class Conflict(ValueError):
@@ -103,7 +103,7 @@ def output_paths(config, entry):
 
 def inspect_outputs(config, entry):
     """Collect absence and conflicts independently; retain bytes only within this check."""
-    result = {'hashes': {}, 'missing': [], 'conflicts': {}, 'md_parts': None}
+    result = {'hashes': {}, 'missing': [], 'conflicts': {}, 'md_parts': None, 'md_data': None}
     expected = entry.get('success', {}).get('outputs', {})
     for ext, path in output_paths(config, entry).items():
         try:
@@ -120,6 +120,7 @@ def inspect_outputs(config, entry):
                     raise Conflict(f'output changed while reading: {path}')
                 try:
                     result['md_parts'] = split(data)
+                    result['md_data'] = data
                 except ValueError:
                     pass
                 managed = entry.get('success', {}).get('md_managed_hash')
@@ -238,14 +239,14 @@ def publish_pair(root, config, state, source, generated, fingerprint, options, a
             if ext == 'md':
                 data = new.read_bytes()
                 try:
-                    managed, user = split(data)
+                    split(data)
                 except ValueError as error:
                     raise Conflict('new Markdown has invalid generated boundaries') from error
                 current_parts = inspection['md_parts']
                 trusted = entry.get('success', {}).get('md_managed_hash')
                 if current_parts and trusted:
-                    user = current_parts[1]
-                new.write_bytes(managed + user)
+                    data = merge(data, inspection['md_data'])
+                new.write_bytes(data)
             with new.open('r+b') as stream:
                 os.fsync(stream.fileno())
             hashes[ext] = file_digest(new)

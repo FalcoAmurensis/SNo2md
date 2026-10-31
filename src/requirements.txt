@@ -1,2 +1,5 @@
-# Production PDF composition; no PyMuPDF, Pillow, or external SDOCX parser.
+# Application runtime dependencies; keep in sync with pyproject.toml.
 pypdf==6.20.1
+pymupdf4llm==1.28.2
+pymupdf==1.28.2
+pymupdf-layout==1.28.2

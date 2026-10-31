@@ -2,6 +2,7 @@
 from copy import deepcopy
 from .folder_selection import selection_for, summary
 from .sync_config import pair_key
+from .gui_text import NFCStringVar, PathStringVar, display
 
 
 class SettingsDialog:
@@ -16,8 +17,8 @@ class SettingsDialog:
         self.window.transient(app.window)
         self.window.grab_set()
         config = app.config or {}
-        self.backup = tk.StringVar(value=config.get('backup', ''))
-        self.vault = tk.StringVar(value=config.get('vault', ''))
+        self.backup = PathStringVar(self.window, config.get('backup', ''))
+        self.vault = PathStringVar(self.window, config.get('vault', ''))
         self.width = tk.StringVar(value=str(config.get('width_scale', 0.5)))
         self.workers = tk.StringVar(value='자동 (권장)' if config.get('workers', 'auto') == 'auto' else str(config['workers']))
         self.autostart = tk.BooleanVar(value=config.get('start_on_login', True))
@@ -27,11 +28,11 @@ class SettingsDialog:
         self.saving = False
         self.save_pending = False
         self.advanced_open = False
-        self.folder_summary = tk.StringVar()
+        self.folder_summary = NFCStringVar(self.window)
         message = '삼성노트가 저장한 백업을 가져옵니다. 앱 자체를 직접 동기화하지 않습니다.'
         if not config:
             message += '\n로그인 자동 시작은 기본으로 켜져 있습니다. 고급 설정에서 변경할 수 있습니다.'
-        self.message = tk.StringVar(value=message)
+        self.message = NFCStringVar(self.window, message)
         self.initial = self.snapshot()
         canvas = tk.Canvas(self.window, highlightthickness=0, width=1)
         scroll = ttk.Scrollbar(self.window, command=canvas.yview)
@@ -43,7 +44,9 @@ class SettingsDialog:
         body.bind('<Configure>', lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
         body.columnconfigure(0, weight=1)
         ttk.Label(body, text='삼성노트 백업').grid(row=0, column=0, sticky='w')
-        self.backup_box = ttk.Combobox(body, textvariable=self.backup, values=app.locations.get('backup', []), width=1)
+        self.backup_candidates = list(app.locations.get('backup', []))
+        self.backup_box = ttk.Combobox(body, textvariable=self.backup, values=[display(p) for p in self.backup_candidates], width=1)
+        self.backup_box.bind('<<ComboboxSelected>>', lambda e: self.backup.set(self.backup_candidates[self.backup_box.current()]))
         self.backup_box.grid(row=1, column=0, sticky='ew', pady=4)
         backup_actions = ttk.Frame(body); backup_actions.grid(row=2, column=0, sticky='w')
         self.folder_button = ttk.Button(backup_actions, text='폴더 선택', command=lambda: self.browse('backup'))
@@ -51,7 +54,9 @@ class SettingsDialog:
         self.file_button = ttk.Button(backup_actions, text='SDOCX 파일 선택', command=lambda: self.browse('file'))
         self.file_button.pack(side='left', padx=6)
         ttk.Label(body, text='저장 폴더/Vault').grid(row=3, column=0, sticky='w', pady=(12, 0))
-        self.vault_box = ttk.Combobox(body, textvariable=self.vault, values=app.locations.get('vault', []), width=1)
+        self.vault_candidates = list(app.locations.get('vault', []))
+        self.vault_box = ttk.Combobox(body, textvariable=self.vault, values=[display(p) for p in self.vault_candidates], width=1)
+        self.vault_box.bind('<<ComboboxSelected>>', lambda e: self.vault.set(self.vault_candidates[self.vault_box.current()]))
         self.vault_box.grid(row=4, column=0, sticky='ew', pady=4)
         self.vault_button = ttk.Button(body, text='저장 폴더 선택', command=lambda: self.browse('vault'))
         self.vault_button.grid(row=5, column=0, sticky='w')

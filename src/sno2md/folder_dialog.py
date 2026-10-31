@@ -2,7 +2,7 @@
 from copy import deepcopy
 from queue import Queue, Empty
 from threading import Thread
-from unicodedata import normalize
+from .gui_text import NFCStringVar, display
 from .folder_selection import inventory, check_state, set_checked, ROOT, TRASH
 
 
@@ -22,7 +22,7 @@ class FolderDialog:
         self.data = None
         self.alive = True
         self.loading = False
-        self.message = tk.StringVar()
+        self.message = NFCStringVar(self.window)
         self.last_error = ''
         info = ttk.Label(self.window, textvariable=self.message, wraplength=530)
         info.pack(fill='x', padx=12, pady=10)
@@ -88,7 +88,7 @@ class FolderDialog:
     def show_error(self):
         from tkinter import messagebox
         if self.last_error:
-            messagebox.showinfo('폴더 목록 기술 정보', self.last_error, parent=self.window)
+            messagebox.showinfo('폴더 목록 기술 정보', display(self.last_error), parent=self.window)
 
     def render(self):
         tree = self.data['tree']
@@ -103,7 +103,7 @@ class FolderDialog:
         for key, node in tree.items():
             mark = {'checked': '☑', 'unchecked': '☐', 'partial': '▣'}[check_state(tree, self.rules, key)]
             # Normalize only the displayed label; IDs, rules and source names stay exact.
-            self.tree.item(key, text=mark + ' ' + normalize('NFC', node['name']))
+            self.tree.item(key, text=mark + ' ' + display(node['name']))
 
     def toggle(self, key):
         if self.loading or not self.data or not key: return

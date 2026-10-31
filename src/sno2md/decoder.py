@@ -207,6 +207,7 @@ def read_note(source):
             try:
                 raw = files[item['id'] + '.page']
                 pg = page(raw)
+                pg['source_page_id'] = item['id']
                 props = pg['properties']
                 if pg['issues'] or props['unconsumed_hex'] or pg['section_tail_hex']:
                     raise Unsupported(f'undecoded page data: {pg["issues"]}')

@@ -4,16 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sno2md"
-version = "0.6.0"
+version = "0.6.1"
 description = "Decode Samsung Notes SDOCX and export PDF and Markdown"
 requires-python = ">=3.10"
 license = "AGPL-3.0-only"
-dependencies = ["pypdf==6.20.1"]
+dependencies = ["pypdf==6.20.1", "pymupdf4llm==1.28.2", "pymupdf==1.28.2", "pymupdf-layout==1.28.2"]
 license-files = ["LICENSE", "third_party/pypdf-LICENSE.txt", "third_party/flatbuffers-LICENSE.txt", "third_party/pymupdf-COPYING.txt", "third_party/pymupdf4llm-COPYING.txt", "third_party/pymupdf-layout-COPYING.txt"]
 
 [project.optional-dependencies]
-markdown = ["pymupdf4llm==1.28.2", "pymupdf==1.28.2", "pymupdf-layout==1.28.2"]
-desktop = ["pymupdf4llm==1.28.2", "pymupdf==1.28.2", "pymupdf-layout==1.28.2", "pywin32==312; sys_platform == 'win32'"]
+desktop = ["pywin32==312; sys_platform == 'win32'"]
 
 [project.scripts]
 sno2md = "sno2md.cli:main"

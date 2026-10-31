@@ -1,4 +1,6 @@
 """Presentation and action eligibility from already-observed state; no file I/O."""
+from unicodedata import normalize
+
 STATUS = {'deferred': '보류', 'failed': '처리 실패', 'missing_output': '저장 파일 없음',
           'excluded': '가져오지 않음', 'pending': '처리 대기', 'waiting': '백업 저장 완료 대기',
           'converting': '문서 변환 중', 'queued': '처리 순서 대기', 'ready_to_publish': '파일 저장 대기',
@@ -30,8 +32,8 @@ def needs_attention(entry, item):
 
 
 def matches(key, entry, item, query, state_filter):
-    haystack = ' '.join((key, entry.get('name', ''), entry.get('folder', ''))).casefold()
-    if query.strip().casefold() not in haystack:
+    haystack = normalize('NFC', ' '.join((key, entry.get('name', ''), entry.get('folder', '')))).casefold()
+    if normalize('NFC', query.strip()).casefold() not in haystack:
         return False
     if state_filter == '최신 상태':
         return entry.get('status') == 'synced' and not needs_attention(entry, item)

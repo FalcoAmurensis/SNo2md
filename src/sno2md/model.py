@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Optional
 
 
-MARKDOWN_SCHEMA = 2
-GENERATOR_VERSION = 'md-3-user-region-pymupdf4llm-1.28.2'
+MARKDOWN_SCHEMA = 3
+GENERATOR_VERSION = 'md-4-page-notes-count-only-pymupdf4llm-1.28.2'
 
 
 class DecodeError(ValueError):

@@ -2,7 +2,7 @@
 import json
 import re
 from urllib.parse import quote
-from .markdown_regions import create
+from .markdown_regions import create, page_user
 from .handwriting import page_handwriting
 from .model import MARKDOWN_SCHEMA, GENERATOR_VERSION, RenderError
 
@@ -49,9 +49,13 @@ def render_markdown(note, pdf_name, backgrounds, engine):
         md.append(f'<!-- sno2md:page-meta\n{payload}\n-->\n')
         for index, source in enumerate(sources, 1):
             text = engine.extract(source['asset'], source['source_pdf_page'] - 1)
+            if any(line.startswith('<!-- sno2md:page-user:') for line in text.splitlines()):
+                raise RenderError('reserved Markdown page user marker in source text')
             if text.strip():
                 title = '원본 PDF 내용' if len(sources) == 1 else f'원본 PDF {index} · {source["source_pdf_page"]}페이지'
                 md.extend([f'### {title}\n', nested_headings(text).strip() + '\n'])
+        identity = pg.get('source_page_id') or pg.get('id') or f'page-{number}'
+        md.append(page_user(str(identity)).decode('utf-8'))
     try:
         return create(md[0].encode('utf-8'), '\n'.join(md[1:]).encode('utf-8')).decode('utf-8')
     except ValueError as error:

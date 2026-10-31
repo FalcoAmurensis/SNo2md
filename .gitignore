@@ -1,6 +1,8 @@
 # Default deny: development docs, private data, outputs and environments stay local.
 *
+/.venv/
 !/.gitignore
+!/AGENTS.md
 
 # Only runtime source code and its required configuration/notices are eligible.
 !/src/
