@@ -79,20 +79,25 @@ class Theme:
         self.refresh(self.root)
 
     def image_element(self, style, name, background, line, selected=None):
-        """Stretch a small ttk style image, keeping a one-pixel bottom rule.
+        """Tile a flat background, keeping a one-pixel bottom rule.
 
         This changes element painting only. Treeview keeps its native rows,
         headings, scrolling, column hit testing and selection bindings.
         """
         if name in style.element_names(): return
         def image(fill, rule):
-            photo = tk.PhotoImage(master=self.root, width=2, height=3)
-            photo.put(fill, to=(0, 0, 2, 2)); photo.put(rule, to=(0, 2, 2, 3))
+            # ttk tiles the center; it does not stretch a 2x2 color swatch.
+            # A tiny swatch causes hundreds of thousands of GDI copies when
+            # painting a maximized list. Larger flat tiles keep the same pixels
+            # and border while bounding the number of native drawing calls.
+            photo = tk.PhotoImage(master=self.root, width=256, height=128)
+            photo.put(fill, to=(0, 0, 256, 127)); photo.put(rule, to=(0, 127, 256, 128))
             self.images[(self.mode.get(), name, fill, rule)] = photo
             return photo
         normal = image(background, line)
         states = [('selected', image(*selected))] if selected else []
-        style.element_create(name, 'image', normal, *states, border=(0, 0, 0, 1), sticky='nswe')
+        style.element_create(name, 'image', normal, *states, border=(0, 0, 0, 1),
+                             width=0, height=0, sticky='nswe')
 
     def table_styles(self, style):
         c = self.colors
@@ -139,9 +144,13 @@ class Theme:
         app.search_icon.place(x=self.pixels(10), rely=.5, anchor='w')
         app.search_placeholder.place(x=self.pixels(34), rely=.5, anchor='w')
         app.tree.tag_configure('attention', foreground=self.colors['fg'])
+        # Theme changes must not reset widths adjusted by the user. Only the
+        # fixed checkbox column follows DPI; flexible columns keep their widths.
         app.tree.column('check', width=self.pixels(46), minwidth=self.pixels(38))
-        app.tree.column('name', width=self.pixels(540))
-        app.tree.column('status', width=self.pixels(360))
+        if not getattr(app, '_columns_initialized', False):
+            app.tree.column('name', width=self.pixels(540))
+            app.tree.column('status', width=self.pixels(360))
+            app._columns_initialized = True
         app.search_hint()
         # apply() recreates theme-local style options even when mode/scale is
         # unchanged, so restore the selected density after every explicit apply.
@@ -150,10 +159,19 @@ class Theme:
         if hasattr(app, 'status_cells'): app.status_cells.queue()
 
     def density(self, app):
-        compact = app.window.winfo_height() <= 520
+        # Normalize the measured fixed content back to regular spacing. This
+        # makes the decision independent of the current density (no oscillation).
+        rows = max(int(button.grid_info()['row']) for button in app.group_buttons.values())+1
+        reduction = 49 + 2*self.pixels(5)*rows
+        regular_fixed = app.fixed_height() + (reduction if getattr(app, '_density_compact', False) else 0)
+        available = min(app.window.winfo_height(), app.client_limit()[1])
+        # A small hysteresis keeps pending Tk geometry requests and one-row /
+        # two-row group transitions from repeatedly flipping the density.
+        compact = available < regular_fixed + (172 if getattr(app, '_density_compact', False) else 140)
         density = (self.mode.get(), compact, round(self.scale, 2))
         if getattr(app, '_theme_density', None) == density: return
         app._theme_density = density
+        app._density_compact = compact
         app.body.configure(padding=(12, 9, 12, 0) if compact else (17, 24, 17, 0))
         app.command_frame.grid_configure(pady=(5, 7) if compact else (10, 15))
         app.groups_frame.grid_configure(pady=(0, 7 if compact else 16))
@@ -183,6 +201,9 @@ class Theme:
     def mapped(self, event):
         if event.widget is self.root or isinstance(event.widget, tk.Toplevel):
             self.refresh(event.widget)
+            if isinstance(event.widget, tk.Toplevel):
+                from .gui_layout import fit_dialog
+                fit_dialog(event.widget)
 
     def titlebar(self, window):
         if sys.platform != 'win32' or not window.winfo_ismapped():

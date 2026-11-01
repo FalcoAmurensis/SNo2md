@@ -12,6 +12,7 @@ from .sync_observation import group
 from .gui_model import (STATUS, GROUPS, FILTERS, execution, close_action,
                         matches, targets, guidance, status_text, document_summary, needs_attention, PENDING)
 from .gui_text import NFCStringVar, NFCText, display, ask_name
+from .gui_layout import client_limit, elide, work_area
 
 
 class Application:
@@ -170,7 +171,7 @@ class Application:
         from .gui_cells import StatusCells
         self.status_cells = StatusCells(self)
         self.theme.main(self)
-        window.bind('<Configure>', lambda e: self.theme.density(self) if e.widget is window else None, add=True)
+        window.bind('<Configure>', self.window_resized, add=True)
         self.controls(); window.after(100, self.poll)
         controller.launch(controller.initialize, kind='initialize')
 
@@ -322,6 +323,13 @@ class Application:
         self.details_button.grid(row=0, column=2, padx=(4, 0))
         self.action_more.grid(row=0, column=3, padx=(4, 0))
 
+    def window_resized(self, event):
+        if event.widget is not self.window: return
+        size = event.width, event.height
+        if getattr(self, '_window_size', None) != size:
+            self._window_size = size
+            self.layout_actions()
+
     def update_banner(self, *_):
         if self.banner.get(): self.banner_label.grid()
         else: self.banner_label.grid_remove()
@@ -348,31 +356,54 @@ class Application:
             parts.append('모든 문서 최신 상태')
         parts.append(f'전체 {values["total"]}개')
         text = ' │ '.join(parts)
-        # Compact wording when large fonts leave little width, preserving counts.
+        # Fit each progressively shorter candidate using the actual rendered
+        # width. The full summary stays available to diagnostics and callers.
         style = self.ttk.Style(self.window)
         actual = font.Font(root=self.window, font=style.lookup('TLabel', 'font'))
         details = ' │ '.join(parts[1:-1])
-        if actual.measure(details) > self.status_info_label.winfo_width():
-            text = text.replace('처리 대기', '대기').replace('대기·진행', '진행').replace('모든 문서 최신 상태', '모든 문서 최신')
-            details = details.replace('처리 대기', '대기').replace('대기·진행', '진행').replace('모든 문서 최신 상태', '모든 문서 최신')
-        wrap = max(120, self.status_info_label.winfo_width())
-        if str(self.status_info_label.cget('wraplength')) != str(wrap): self.status_info_label.configure(wraplength=wrap)
+        available = max(0, self.status_info_label.winfo_width())
+        brief = details.replace('처리 대기', '대기').replace('대기·진행', '진행').replace('모든 문서 최신 상태', '모든 문서 최신')
+        shortest = ' · '.join(([f'확인 {values["attention"]}'] if values['attention'] else []) +
+                              ([f'대기 {values["pending"]}'] if values['pending'] else []))
+        details = next((value for value in (details, brief, shortest) if value and actual.measure(value) <= available),
+                       elide(shortest or brief, available, actual.measure))
+        if str(self.status_info_label.cget('wraplength')) != '0': self.status_info_label.configure(wraplength=0)
         if self.status_info.get() != details: self.status_info.set(details)
         if self.total_summary.get() != parts[-1]: self.total_summary.set(parts[-1])
         if details and not self.status_separator.winfo_manager(): self.status_separator.grid()
         elif not details and self.status_separator.winfo_manager(): self.status_separator.grid_remove()
         self.status_summary.set(text)
 
+    def client_limit(self):
+        return client_limit(self.window)
+
+    def fixed_height(self):
+        """Measured fixed rows, including grid gaps and the body's padding."""
+        fixed = (self.header, self.command_frame, self.filter_area, self.action_frame, self.status_frame)
+        def number(value): return self.window.winfo_pixels(value)
+        height = 0
+        for widget in fixed:
+            if not widget.winfo_manager(): continue
+            value = widget.grid_info().get('pady', 0)
+            pad = (value,) if isinstance(value, int) else self.window.tk.splitlist(value)
+            height += widget.winfo_reqheight() + (2*number(pad[0]) if len(pad) == 1 else sum(map(number, pad)))
+        padding = self.window.tk.splitlist(self.body.cget('padding'))
+        height += sum(number(padding[i]) for i in (1,3)) if len(padding) == 4 else 0
+        height += 8  # Table top gap.
+        return height
+
     def fit_layout(self):
         if self.closing: return
         self.theme.density(self)
-        fixed = (self.header, self.command_frame, self.filter_area, self.status_frame)
-        required = sum(widget.winfo_reqheight() for widget in fixed) + 64  # Body padding and grid gaps.
-        if self.action_frame.winfo_manager(): required += self.action_frame.winfo_reqheight()
-        # Keep the list usable at unusually large system fonts rather than
-        # clipping fixed commands/status or restoring an outer page scrollbar.
-        minimum = (700, max(480, required + 120))
+        width, height = self.client_limit()
+        required = self.fixed_height()
+        minimum = (min(700, width), min(height, max(480, required + 120)))
         if self.window.minsize() != minimum: self.window.minsize(*minimum)
+        # Shrink the initial window if the taskbar / monitor cannot contain it.
+        current = self.window.winfo_width(), self.window.winfo_height()
+        if self.window.state() == 'normal' and (current[0] > width or current[1] > height):
+            left,top,_,_=work_area(self.window)
+            self.window.geometry(f'{min(current[0],width)}x{min(current[1],height)}{left:+d}{top:+d}')
 
     def popup_actions(self, x, y):
         if self.closing or not self.checked_targets(): return 'break'

@@ -54,7 +54,8 @@ class StatusCells:
         if self.closed: return 'break'
         # Hit testing is always done by the live Treeview, not a cached label ID.
         options = dict(x=label.winfo_x()+event.x, y=label.winfo_y()+event.y,
-                       rootx=event.x_root, rooty=event.y_root, state=event.state)
+                       rootx=event.x_root, rooty=event.y_root, state=event.state,
+                       time=event.time)
         if sequence == '<MouseWheel>': options['delta'] = event.delta
         self.tree.event_generate(sequence, **options)
         return 'break'
