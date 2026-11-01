@@ -9,19 +9,23 @@ import sys
 from .desktop import DesktopController
 from .locations import state_directory
 from .sync_observation import group
-from .gui_model import (STATUS, GROUPS, FILTERS, execution, close_action,
+from .gui_model import (STATUS, GROUPS, FILTERS, execution, close_action, failed, format_time, synced_at,
                         matches, targets, guidance, status_text, document_summary, needs_attention, PENDING)
 from .gui_text import NFCStringVar, NFCText, display, ask_name
-from .gui_layout import client_limit, elide, work_area
+from .gui_layout import client_limit, elide, work_area, window_dpi
+
+WORKING = ('converting', 'ready_to_publish')
 
 
 class Application:
-    def __init__(self, window, controller, native, tray=None, startup=False):
+    def __init__(self, window, controller, native, tray=None, startup=False, dpi_aware=False):
         import tkinter as tk
         from tkinter import ttk
         self.tk, self.ttk = tk, ttk
         self.window, self.controller, self.native, self.tray = window, controller, native, tray
         self.startup = startup
+        self.dpi_aware = dpi_aware
+        self.dpi = window_dpi(window) if dpi_aware else 96
         self.config = None
         self.notes, self.observations, self.tree_keys = {}, {}, {}
         self.checked = set()
@@ -35,13 +39,18 @@ class Application:
         self.selected_paths = {}
         self.closing = self.initialized = self.failed = False
         self.log_lines = []
+        # Progress of the current run, derived from observed note states only.
+        self.run_keys, self.working_names, self.status_texts = set(), [], {}
+        self.last_sync = self.latest_success = None
+        self.chip_counts = {'확인 필요': 0, '실패': 0}
         self.search = NFCStringVar(window)
         self.state_filter = NFCStringVar(window, '전체')
         self.banner = NFCStringVar(window, '설정을 불러오는 중…')
         self.run_label = NFCStringVar(window, '작업 중')
         self.close_hint = NFCStringVar(window)
         self.selection_summary = NFCStringVar(window, '선택 0개')
-        self.result_count = NFCStringVar(window, '검색 결과 0개 · 내 문서 0개')
+        self.result_count = NFCStringVar(window, '검색 결과 0개')
+        self.empty_text = NFCStringVar(window)
         self.attention_summary = NFCStringVar(window)
         self.status_summary = NFCStringVar(window)
         self.status_info = NFCStringVar(window)
@@ -50,20 +59,34 @@ class Application:
         self.backup_summary = NFCStringVar(window, '삼성노트 백업: 설정이 필요합니다.')
         self.vault_summary = NFCStringVar(window, '저장 폴더/Vault: 설정이 필요합니다.')
         self.folder_summary = NFCStringVar(window)
-        window.title('SNo2md — 삼성노트 동기화')
-        window.geometry('1000x650'); window.minsize(700, 480)
+        window.title('SNo2md')
+        factor = self.dpi/96
+        self.base_size = (round(700*factor), round(480*factor))
+        window.geometry(f'{round(1000*factor)}x{round(650*factor)}'); window.minsize(*self.base_size)
         from .gui_theme import Theme
         self.theme = Theme(window)
-        self.body = body = ttk.Frame(window, padding=(17, 12))
+        sp = self.theme.space
+        # The status bar spans the whole window edge, like a document editor's.
+        self.status_frame = status = ttk.Frame(window, style='Status.TFrame')
+        status.pack(side='bottom', fill='x')
+        self.body = body = ttk.Frame(window)
         body.pack(fill='both', expand=True)
-        body.columnconfigure(0, weight=1); body.rowconfigure(3, weight=1)
-        self.header = header = ttk.Frame(body); header.grid(row=0, column=0, sticky='ew')
-        header.columnconfigure(0, weight=1)
-        ttk.Label(header, text='SNo2md', style='Title.TLabel').grid(row=0, column=0, sticky='w')
-        self.settings_button = ttk.Button(header, text='설정', command=self.edit_settings)
-        self.settings_button.grid(row=0, column=1, padx=(4, 0))
+        body.columnconfigure(0, weight=1); body.rowconfigure(2, weight=1)
+        # One command bar: sync work on the left, settings and the app menu on the right.
+        self.command_frame = self.header = actions = ttk.Frame(body)
+        actions.grid(row=0, column=0, sticky='ew')
+        actions.columnconfigure(3, weight=1)
+        self.once_button = ttk.Button(actions, text='지금 동기화', command=self.sync_once, style='Accent.TButton')
+        self.watch_button = ttk.Button(actions, text='자동 동기화 시작', command=self.toggle)
+        self.open_button = ttk.Button(actions, text='Vault 열기', command=self.open_vault)
+        self.run_buttons = (self.once_button, self.watch_button, self.open_button)
+        self.once_button.grid(row=0, column=0)
+        self.watch_button.grid(row=0, column=1, padx=(sp('xs'), 0))
+        self.open_button.grid(row=0, column=2, padx=(sp('xs'), 0))
+        self.settings_button = ttk.Button(actions, text='설정', command=self.edit_settings)
+        self.settings_button.grid(row=0, column=4, padx=(sp('xs'), 0))
         self.global_menu = tk.Menu(window, tearoff=False, postcommand=self.controls)
-        self.global_menu.add_command(label='전역 진단·로그', command=lambda: self.details(global_view=True))
+        self.global_menu.add_command(label='진단 및 로그', command=lambda: self.details(global_view=True))
         self.global_menu.add_command(label='경로 진단', command=lambda: self.diagnose_paths(set()))
         self.global_menu.add_command(label='최근 보존본 보기', command=self.preserved_copies)
         self.global_menu.add_separator()
@@ -72,53 +95,51 @@ class Application:
         for label, mode in (('라이트', 'light'), ('다크', 'dark')):
             self.global_menu.add_radiobutton(label=label+' 테마', variable=self.theme.mode, value=mode,
                                             command=lambda mode=mode: self.change_theme(mode))
-        self.global_more = ttk.Menubutton(header, text='메뉴', menu=self.global_menu)
-        self.global_more.grid(row=0, column=2, padx=(4, 0))
-        self.command_frame = actions = ttk.Frame(body); actions.grid(row=1, column=0, sticky='ew', pady=(8, 6))
-        actions.columnconfigure(3, weight=1)
-        self.once_button = ttk.Button(actions, text='지금 동기화', command=self.sync_once, style='Accent.TButton')
-        self.watch_button = ttk.Button(actions, text='자동 동기화 시작', command=self.toggle)
-        self.open_button = ttk.Button(actions, text='Vault 열기', command=self.open_vault)
-        self.run_buttons = (self.once_button, self.watch_button, self.open_button)
-        self.once_button.grid(row=0, column=0, padx=(0, 4))
-        self.watch_button.grid(row=0, column=1)
-        self.open_button.grid(row=0, column=2, padx=(4, 0))
-        self.filter_area = filter_area = ttk.Frame(body); filter_area.grid(row=2, column=0, sticky='ew')
-        filter_area.columnconfigure(1, weight=1)
-        self.groups_frame = ttk.Frame(filter_area); self.groups_frame.grid(row=0, column=0, columnspan=3, sticky='ew', pady=(0, 6))
+        self.global_more = ttk.Menubutton(actions, text='메뉴', menu=self.global_menu)
+        self.global_more.grid(row=0, column=5, padx=(sp('xs'), 0))
+        self.filter_area = filter_area = ttk.Frame(body); filter_area.grid(row=1, column=0, sticky='ew')
+        filter_area.columnconfigure(0, weight=1)
+        self.groups_frame = ttk.Frame(filter_area); self.groups_frame.grid(row=0, column=0, columnspan=4, sticky='ew')
         self.group_buttons = {}
         for index, (key, label) in enumerate(GROUPS.items()):
             button = ttk.Button(self.groups_frame, text=label, style='Group.TButton', command=lambda key=key: self.change_group(key))
-            button.grid(row=0, column=index, sticky='ew', padx=(0, 4))
+            button.grid(row=0, column=index, sticky='w', padx=(0, sp('xl')))
             self.group_buttons[key] = button
+        self.groups_rule = ttk.Separator(filter_area)
+        self.groups_rule.grid(row=1, column=0, columnspan=4, sticky='ew')
         self.search_box = ttk.Entry(filter_area, textvariable=self.search, width=1, style='Search.TEntry')
-        self.search_box.grid(row=1, column=0, columnspan=2, sticky='ew')
+        self.search_box.grid(row=2, column=0, sticky='ew')
         self.search_icon = tk.Label(self.search_box, borderwidth=0, highlightthickness=0, padx=0, pady=0, cursor='xterm')
         self.search_placeholder = tk.Label(self.search_box, text='문서 검색', borderwidth=0, highlightthickness=0,
                                            padx=0, pady=0, cursor='xterm', font='SunValleyBodyFont')
         for label in (self.search_icon, self.search_placeholder):
             label.bind('<Button-1>', lambda e: self.search_box.focus_set())
         self.search.trace_add('write', self.search_hint)
-        self.filter_box = ttk.Combobox(filter_area, textvariable=self.state_filter, values=FILTERS, state='readonly', width=12, style='Filter.TCombobox')
-        self.filter_box.grid(row=1, column=2, padx=(6, 0))
-        self.result_label = ttk.Label(filter_area, textvariable=self.result_count, width=1, style='Muted.TLabel')
-        self.result_label.grid(row=2, column=0, columnspan=3, sticky='ew', pady=(4, 0))
-        self.table_frame = table = ttk.Frame(body); table.grid(row=3, column=0, sticky='nsew', pady=(8, 0))
+        # Problem filters sit next to search; each hides itself at zero.
+        self.attention_chip = ttk.Button(filter_area, style='Chip.TButton', command=lambda: self.toggle_filter('확인 필요'))
+        self.failure_chip = ttk.Button(filter_area, style='Chip.TButton', command=lambda: self.toggle_filter('실패'))
+        self.filter_chips = {'확인 필요': self.attention_chip, '실패': self.failure_chip}
+        self.filter_box = ttk.Combobox(filter_area, textvariable=self.state_filter, values=FILTERS, state='readonly', width=10, style='Filter.TCombobox')
+        self.filter_box.grid(row=2, column=3, padx=(sp('xs'), 0))
+        self.table_frame = table = ttk.Frame(body); table.grid(row=2, column=0, sticky='nsew')
         table.columnconfigure(0, weight=1); table.rowconfigure(0, weight=1)
-        self.tree = ttk.Treeview(table, columns=('check', 'name', 'status'), show='headings', selectmode='extended', height=5, style='Document.Treeview')
+        self.tree = ttk.Treeview(table, columns=('check', 'name', 'status', 'time'), show='headings', selectmode='extended', height=5, style='Document.Treeview')
         self.tree.heading('check', text='☐', command=self.toggle_all_checked)
-        self.tree.column('check', width=38, minwidth=38, stretch=False, anchor='center')
-        for key, label, width in (('name', '문서명', 320), ('status', '상태', 260)):
-            self.tree.heading(key, text=label, anchor='w'); self.tree.column(key, width=width, minwidth=100)
+        self.tree.column('check', width=40, minwidth=36, stretch=False, anchor='center')
+        self.tree.heading('name', text='문서명', anchor='w'); self.tree.column('name', width=320, minwidth=120)
+        self.tree.heading('status', text='상태', anchor='center'); self.tree.column('status', width=56, minwidth=48, stretch=False, anchor='center')
+        self.tree.heading('time', text='동기화 일시', anchor='w'); self.tree.column('time', width=150, minwidth=90, stretch=False)
         self.tree.grid(row=0, column=0, sticky='nsew')
-        scroll = ttk.Scrollbar(table, command=self.tree.yview); scroll.grid(row=0, column=1, sticky='ns')
+        from .gui_cells import ListScrollbar, StatusCells
+        self.list_scroll = ListScrollbar(self, table)
         def scrolled(first, last):
             position = (first,last)
             if getattr(self,'tree_scroll_position',None) != position:
                 self.tree_scroll_position = position
-                scroll.set(first, last)
+                self.list_scroll.set(first, last)
                 if hasattr(self, 'status_cells'): self.status_cells.queue()
         self.tree.configure(yscrollcommand=scrolled)
+        self.empty_label = ttk.Label(self.tree, textvariable=self.empty_text, style='Empty.TLabel', anchor='center', justify='center')
         self.tree.bind('<Button-1>', self.click_check)
         self.tree.bind('<space>', self.space_check)
         self.tree.bind('<Control-a>', self.select_all)
@@ -127,14 +148,15 @@ class Application:
         self.tree.bind('<Button-3>', self.context_menu)
         self.tree.bind('<Shift-F10>', self.keyboard_context_menu)
         self.tree.bind('<App>', self.keyboard_context_menu)
-        self.action_frame = ttk.Frame(body); self.action_frame.grid(row=4, column=0, sticky='ew', pady=(6, 0))
+        self.action_frame = ttk.Frame(body); self.action_frame.grid(row=3, column=0, sticky='ew')
         self.action_frame.columnconfigure(0, weight=1)
-        self.selection_label = ttk.Label(self.action_frame, textvariable=self.selection_summary)
+        self.selection_label = ttk.Label(self.action_frame, textvariable=self.selection_summary, style='Muted.TLabel')
         self.selection_label.grid(row=0, column=0, sticky='w')
-        self.retry_button = ttk.Button(self.action_frame, command=self.retry, style='Accent.TButton')
-        self.restore_button = ttk.Button(self.action_frame, command=self.restore, style='Accent.TButton')
-        self.policy_button = ttk.Button(self.action_frame, command=self.policy, style='Accent.TButton')
-        self.resolve_button = ttk.Button(self.action_frame, command=self.resolve, style='Accent.TButton')
+        self.result_label = ttk.Label(self.action_frame, textvariable=self.result_count, width=1, style='Muted.TLabel')
+        self.retry_button = ttk.Button(self.action_frame, command=self.retry)
+        self.restore_button = ttk.Button(self.action_frame, command=self.restore)
+        self.policy_button = ttk.Button(self.action_frame, command=self.policy)
+        self.resolve_button = ttk.Button(self.action_frame, command=self.resolve)
         self.rename_button = ttk.Button(self.action_frame, text='다른 이름으로 저장', command=self.rename)
         self.details_button = ttk.Button(self.action_frame, text='문제 보기', command=self.details)
         self.document_buttons = (self.retry_button, self.restore_button, self.policy_button, self.resolve_button, self.rename_button, self.details_button)
@@ -145,35 +167,37 @@ class Application:
             self.action_menu.add_command(label=label, command=command)
         self.action_more = ttk.Menubutton(self.action_frame, text='기타 작업', menu=self.action_menu)
         self.groups_frame.bind('<Configure>', lambda e: self.group_labels())
-        self.status_frame = status = ttk.Frame(body, style='Status.TFrame'); status.grid(row=5, column=0, sticky='ew', pady=(8, 0))
-        status.columnconfigure(3, weight=1)
-        ttk.Separator(status).grid(row=0, column=0, columnspan=5, sticky='ew')
-        self.banner_label = ttk.Label(status, textvariable=self.banner, width=1, anchor='w', style='Status.TLabel')
-        self.banner_label.grid(row=1, column=0, columnspan=5, sticky='ew', pady=(0, 4))
-        self.banner_label.bind('<Configure>', lambda e: self.banner_label.configure(wraplength=max(120, e.width)))
-        self.status_dot = ttk.Label(status, text='•', width=2, anchor='w', style='Status.TLabel')
-        self.status_dot.grid(row=2, column=0, sticky='w', padx=(8, 0))
-        self.status_label = ttk.Label(status, textvariable=self.run_label, style='Status.TLabel')
-        self.status_label.grid(row=2, column=1, sticky='w')
+        # Status bar: state | progress or last sync | current document or total.
+        status.columnconfigure(6, weight=1)
+        self.status_dot = ttk.Label(status, style='Status.TLabel')
+        self.status_dot.grid(row=0, column=0, sticky='w', padx=(sp('l'), sp('s')))
+        self.status_label = ttk.Label(status, textvariable=self.run_label, style='StatusStrong.TLabel')
+        self.status_label.grid(row=0, column=1, sticky='w')
         self.status_separator = ttk.Separator(status, orient='vertical')
-        self.status_separator.grid(row=2, column=2, sticky='ns', padx=10, pady=10)
-        self.status_info_label = ttk.Label(status, textvariable=self.status_info, width=1, style='Status.TLabel')
-        self.status_info_label.grid(row=2, column=3, sticky='ew')
-        self.status_info_label.bind('<Configure>', lambda e: self.update_status())
+        self.status_separator.grid(row=0, column=2, sticky='ns', padx=sp('m'), pady=sp('s'))
+        self.status_info_label = ttk.Label(status, textvariable=self.status_info, style='Status.TLabel')
+        self.status_info_label.grid(row=0, column=3, sticky='w')
+        self.end_separator = ttk.Separator(status, orient='vertical')
+        self.end_separator.grid(row=0, column=4, sticky='ns', padx=sp('m'), pady=sp('s'))
         self.total_label = ttk.Label(status, textvariable=self.total_summary, style='Status.TLabel')
-        self.total_label.grid(row=2, column=4, sticky='e', padx=(10, 8))
-        self.banner.trace_add('write', self.update_banner)
-        self.update_banner()
+        self.total_label.grid(row=0, column=5, sticky='w', padx=(0, sp('l')))
+        status.bind('<Configure>', lambda e: self.update_status())
+        self.banner.trace_add('write', lambda *_: self.update_status())
         window.protocol('WM_DELETE_WINDOW', self.on_close)
         window.report_callback_exception = lambda kind, value, tb: self.error(f'{kind.__name__}: {value}')
         self.search.trace_add('write', lambda *_: self.filter_changed())
         self.state_filter.trace_add('write', lambda *_: self.filter_changed())
-        from .gui_cells import StatusCells
         self.status_cells = StatusCells(self)
         self.theme.main(self)
         window.bind('<Configure>', self.window_resized, add=True)
         self.controls(); window.after(100, self.poll)
         controller.launch(controller.initialize, kind='initialize')
+
+    def size(self, view, width, height, min_width, min_height):
+        """Dialog size in 96 DPI units, scaled when the process draws at the real DPI."""
+        factor = self.dpi/96
+        view.geometry(f'{round(width*factor)}x{round(height*factor)}')
+        view.minsize(round(min_width*factor), round(min_height*factor))
 
     def change_theme(self, mode):
         self.theme.apply(mode)
@@ -185,6 +209,9 @@ class Application:
     def search_hint(self, *_):
         if self.search.get(): self.search_placeholder.place_forget()
         else: self.search_placeholder.place(x=self.theme.pixels(34), rely=.5, anchor='w')
+
+    def toggle_filter(self, name):
+        self.state_filter.set('전체' if self.state_filter.get() == name else name)
 
     def edit_settings(self):
         if self.controller.busy or self.closing or self.resolution_view: return
@@ -287,13 +314,27 @@ class Application:
     def group_labels(self):
         counts = getattr(self, 'group_counts', {})
         for key, button in self.group_buttons.items():
-            button.configure(text=f'{GROUPS[key]} ({counts.get(key, 0)})')
+            count = counts.get(key, 0)
+            button.configure(text=f'{GROUPS[key]} {count}',
+                             style='Zero.Group.TButton' if count == 0 and key != self.group else 'Group.TButton')
             button.state(['selected', '!pressed'] if key == self.group else ['!selected', '!pressed'])
-        columns = 4 if sum(b.winfo_reqwidth()+4 for b in self.group_buttons.values()) <= self.groups_frame.winfo_width() else 2
-        for column in range(4):
-            self.groups_frame.columnconfigure(column, weight=1 if column < columns else 0)
+        gap = self.theme.space('xl')
+        columns = 4 if sum(b.winfo_reqwidth()+gap for b in self.group_buttons.values()) <= self.groups_frame.winfo_width() else 2
         for index, button in enumerate(self.group_buttons.values()):
-            button.grid(row=index//columns, column=index%columns, sticky='ew', padx=(0, 4), pady=1)
+            button.grid(row=index//columns, column=index%columns, sticky='w', padx=(0, gap), pady=0)
+
+    def update_chips(self):
+        """Problem filters: visible with a count, or while their filter is active."""
+        sp = self.theme.space
+        current = self.state_filter.get()
+        for column, (name, chip) in enumerate(self.filter_chips.items(), start=1):
+            count = self.chip_counts.get(name, 0)
+            text = f'{name} {count}'
+            if chip.cget('text') != text: chip.configure(text=text)
+            chip.state(['selected'] if current == name else ['!selected'])
+            if count or current == name:
+                if not chip.winfo_manager(): chip.grid(row=2, column=column, padx=(sp('s') if column == 1 else sp('xs'), 0))
+            elif chip.winfo_manager(): chip.grid_remove()
 
     def layout_actions(self, event=None):
         if getattr(self, 'layout_job', None) is None:
@@ -302,94 +343,138 @@ class Application:
                 self.fit_layout()
             self.layout_job = self.window.after_idle(fit)
         chosen = bool(self.checked_targets())
+        filtering = bool(self.search.get().strip()) or self.state_filter.get() != '전체'
         candidates = (self.policy_button,) if self.group == 'retired' else (self.resolve_button, self.restore_button, self.retry_button)
         primary = next((b for b in candidates if str(b.cget('state')) == 'normal'), None) if chosen else None
         height = max(widget.winfo_reqheight() for widget in (*self.document_buttons, self.action_more))
-        layout = (chosen, primary, height)
+        height += 2*self.theme.space('s')
+        layout = (chosen, primary, height, filtering)
         if getattr(self, 'action_layout', None) == layout: return
         self.action_layout = layout
         for button in self.document_buttons: button.grid_remove()
         self.action_frame.configure(height=height)
         self.action_frame.grid_propagate(False)
         self.action_frame.rowconfigure(0, minsize=height)
+        sp = self.theme.space
         if not chosen:
             self.selection_label.grid_remove(); self.action_more.grid_remove()
+            if filtering: self.result_label.grid(row=0, column=0, sticky='ew')
+            else: self.result_label.grid_remove()
             self.primary_button = None
             return
+        self.result_label.grid_remove()
         self.selection_label.grid()
         self.primary_button = primary
         if self.primary_button:
-            self.primary_button.grid(row=0, column=1, padx=(4, 0))
-        self.details_button.grid(row=0, column=2, padx=(4, 0))
-        self.action_more.grid(row=0, column=3, padx=(4, 0))
+            self.primary_button.grid(row=0, column=1, padx=(sp('xs'), 0))
+        self.details_button.grid(row=0, column=2, padx=(sp('xs'), 0))
+        self.action_more.grid(row=0, column=3, padx=(sp('xs'), 0))
 
     def window_resized(self, event):
         if event.widget is not self.window: return
+        if self.dpi_aware:
+            dpi = window_dpi(self.window)
+            if dpi != self.dpi: self.rescale(dpi); return
         size = event.width, event.height
         if getattr(self, '_window_size', None) != size:
             self._window_size = size
             self.layout_actions()
 
-    def update_banner(self, *_):
-        if self.banner.get(): self.banner_label.grid()
-        else: self.banner_label.grid_remove()
+    def rescale(self, dpi):
+        """Follow a monitor DPI change: fonts, sprites, spacing and the window size."""
+        ratio = dpi/self.dpi
+        self.dpi = dpi
+        self.window.tk.call('tk', 'scaling', dpi/72)
+        self.base_size = (round(700*dpi/96), round(480*dpi/96))
+        if self.window.state() == 'normal':
+            width, height = self.window.winfo_width(), self.window.winfo_height()
+            self.window.geometry(f'{round(width*ratio)}x{round(height*ratio)}')
+        self.change_theme(self.theme.mode.get())
 
     def update_status(self):
         import tkinter.font as font
         values = self.summary
         mode = execution(self.controller.busy, self.controller.kind, self.controller.stop_event.is_set())
-        if self.failed or values['attention']:
-            self.status_indicator = 'red'
-        elif (not self.initialized or not self.config or values['pending']
-              or mode in ('working', 'stopping') or values['total'] and not values['all_current']):
-            self.status_indicator = 'yellow'
+        total = values['total']
+        working = mode == 'working' or (mode == 'watch' and values['pending'])
+        if self.failed:
+            kind = 'error'
+        elif not self.initialized:
+            kind = 'idle'
+        elif not self.config:
+            kind = 'setup'
+        elif mode == 'stopping':
+            kind = 'stopping'
+        elif working:
+            kind = 'sync'
         else:
-            self.status_indicator = 'green'
-        color = self.theme.colors[self.status_indicator]
-        if str(self.status_dot.cget('foreground')) != color: self.status_dot.configure(foreground=color)
+            kind = 'watch' if mode == 'watch' else 'idle'
+        self.status_indicator = kind
+        run = {'setup': '설정 필요', 'stopping': '중지 중', 'sync': '동기화 중', 'watch': '자동 동기화 중'}.get(
+            kind, self.run_label.get() if kind == 'error' else '대기 중' if self.initialized else '준비 중')
+        if self.run_label.get() != run and kind != 'error': self.run_label.set(run)
+        image = self.theme.dot(kind)
+        if getattr(self.status_dot, '_image', None) is not image:
+            self.status_dot.configure(image=image); self.status_dot._image = image
+        banner = self.banner.get()
+        if banner:
+            info = banner
+        elif kind == 'sync' and self.run_keys:
+            done = len(self.run_keys - {k for k, e in self.notes.items() if e.get('status') in PENDING})
+            info = f'{done} / {len(self.run_keys)}개 처리'
+        elif kind == 'sync':
+            info = '변경 사항 확인 중'
+        else:
+            latest = max((t for t in (self.last_sync, self.latest_success) if t), default=None)
+            info = f'마지막 동기화 {format_time(latest)}' if latest else '아직 동기화하지 않음'
+        if kind == 'sync' and self.working_names:
+            end = f'현재: {self.working_names[0]}' + (f' 외 {len(self.working_names)-1}개' if len(self.working_names) > 1 else '')
+        else:
+            end = f'전체 문서 {total}개'
+        # Diagnostics keep a complete one-line summary independent of the bar's width.
+        parts = [run]
         self.attention_summary.set(f'확인 필요 {values["attention"]}개' if values['attention'] else '')
-        parts = [self.run_label.get()]
         if values['attention']: parts.append(self.attention_summary.get())
         if values['pending']:
-            parts.append(f'{"대기·진행" if values["processing"] else "처리 대기"} {values["pending"]}개')
+            parts.append(f'{"처리 중" if values["processing"] else "처리 대기"} {values["pending"]}개')
         elif values['all_current'] and not self.failed and mode in ('idle', 'watch'):
             parts.append('모든 문서 최신 상태')
-        parts.append(f'전체 {values["total"]}개')
-        text = ' │ '.join(parts)
-        # Fit each progressively shorter candidate using the actual rendered
-        # width. The full summary stays available to diagnostics and callers.
+        parts.append(f'전체 {total}개')
+        self.status_summary.set(', '.join(parts))
+        # Fit the middle text with real font metrics; the end column is dropped last.
         style = self.ttk.Style(self.window)
         actual = font.Font(root=self.window, font=style.lookup('TLabel', 'font'))
-        details = ' │ '.join(parts[1:-1])
-        available = max(0, self.status_info_label.winfo_width())
-        brief = details.replace('처리 대기', '대기').replace('대기·진행', '진행').replace('모든 문서 최신 상태', '모든 문서 최신')
-        shortest = ' · '.join(([f'확인 {values["attention"]}'] if values['attention'] else []) +
-                              ([f'대기 {values["pending"]}'] if values['pending'] else []))
-        details = next((value for value in (details, brief, shortest) if value and actual.measure(value) <= available),
-                       elide(shortest or brief, available, actual.measure))
-        if str(self.status_info_label.cget('wraplength')) != '0': self.status_info_label.configure(wraplength=0)
-        if self.status_info.get() != details: self.status_info.set(details)
-        if self.total_summary.get() != parts[-1]: self.total_summary.set(parts[-1])
-        if details and not self.status_separator.winfo_manager(): self.status_separator.grid()
-        elif not details and self.status_separator.winfo_manager(): self.status_separator.grid_remove()
-        self.status_summary.set(text)
+        sp = self.theme.space
+        fixed = sum(w.winfo_reqwidth() for w in (self.status_dot, self.status_label))
+        fixed += sp('l') + sp('s') + 2*(2*sp('m')+2) + sp('l')
+        available = max(0, self.status_frame.winfo_width() - fixed - actual.measure(end))
+        if available < actual.measure('…')*6:
+            end = ''
+            available = max(0, self.status_frame.winfo_width() - fixed)
+        info = elide(info, available, actual.measure)
+        if self.status_info.get() != info: self.status_info.set(info)
+        if self.total_summary.get() != end: self.total_summary.set(end)
+        if end and not self.end_separator.winfo_manager(): self.end_separator.grid()
+        elif not end and self.end_separator.winfo_manager(): self.end_separator.grid_remove()
 
     def client_limit(self):
         return client_limit(self.window)
 
     def fixed_height(self):
         """Measured fixed rows, including grid gaps and the body's padding."""
-        fixed = (self.header, self.command_frame, self.filter_area, self.action_frame, self.status_frame)
+        fixed = (self.command_frame, self.filter_area, self.action_frame)
         def number(value): return self.window.winfo_pixels(value)
+        def pads(value):
+            pad = (value,) if isinstance(value, int) else self.window.tk.splitlist(value)
+            return 2*number(pad[0]) if len(pad) == 1 else sum(map(number, pad))
         height = 0
         for widget in fixed:
             if not widget.winfo_manager(): continue
-            value = widget.grid_info().get('pady', 0)
-            pad = (value,) if isinstance(value, int) else self.window.tk.splitlist(value)
-            height += widget.winfo_reqheight() + (2*number(pad[0]) if len(pad) == 1 else sum(map(number, pad)))
+            height += widget.winfo_reqheight() + pads(widget.grid_info().get('pady', 0))
+        height += self.status_frame.winfo_reqheight()
         padding = self.window.tk.splitlist(self.body.cget('padding'))
         height += sum(number(padding[i]) for i in (1,3)) if len(padding) == 4 else 0
-        height += 8  # Table top gap.
+        height += pads(self.table_frame.grid_info().get('pady', 0))
         return height
 
     def fit_layout(self):
@@ -397,7 +482,7 @@ class Application:
         self.theme.density(self)
         width, height = self.client_limit()
         required = self.fixed_height()
-        minimum = (min(700, width), min(height, max(480, required + 120)))
+        minimum = (min(self.base_size[0], width), min(height, max(self.base_size[1], required + self.theme.pixels(120))))
         if self.window.minsize() != minimum: self.window.minsize(*minimum)
         # Shrink the initial window if the taskbar / monitor cannot contain it.
         current = self.window.winfo_width(), self.window.winfo_height()
@@ -482,16 +567,20 @@ class Application:
         self.menu_entry(self.global_menu, 0, state='disabled' if self.closing else 'normal')
         self.menu_entry(self.global_menu, 1, state='normal' if self.config and not busy and not self.closing else 'disabled')
         self.menu_entry(self.global_menu, 2, state='normal' if any(e.get('last_preserved_copy') for e in self.notes.values()) and not self.closing else 'disabled')
-        self.run_label.set({'idle': '대기 중', 'watch': '자동 동기화 중', 'working': '작업 중', 'stopping': '중지 중'}[mode])
+        if not self.failed:
+            self.run_label.set({'idle': '대기 중', 'watch': '자동 동기화 중', 'working': '동기화 중', 'stopping': '중지 중'}[mode])
         self.close_hint.set('창을 닫으면 트레이에서 자동 동기화를 계속합니다.' if mode == 'watch' and self.tray and self.tray.visible else
                             '창을 닫으면 진행 중 작업을 마무리한 뒤 종료합니다.' if busy else '창을 닫으면 프로그램이 종료됩니다.')
         if self.initialized and not self.config and not busy and not self.failed and not self.closing:
             self.banner.set('설정에서 삼성노트 백업과 저장 폴더/Vault를 선택하세요.')
+        if not busy and self.run_keys:
+            self.run_keys.clear()
         if self.tray:
             self.tray.watching = mode == 'watch'
             self.tray.busy = busy
             self.tray.stopping = mode == 'stopping'
         self.update_status()
+        self.update_chips()
         self.layout_actions()
 
     def update_config_summary(self):
@@ -551,7 +640,7 @@ class Application:
         message = ('자동 갱신 대상으로 되돌립니다. 파일을 즉시 만들지는 않습니다. 누락 파일은 별도로 다시 저장하세요.'
                    if action == 'resume' else '남은 파일과 동기화 이력은 유지하며 이 문서의 자동 갱신을 중단합니다.')
         if messagebox.askyesno('관리 재개' if action == 'resume' else '관리 중단',
-                              f'선택 {len(self.checked_targets())}개 · 실행 가능 {len(accepted)}개\n\n{message}', parent=self.window):
+                              f'선택 {len(self.checked_targets())}개 중 실행 가능 {len(accepted)}개\n\n{message}', parent=self.window):
             self.pending_results.extend(skipped)
             self.controller.policy(accepted, policy); self.controls()
 
@@ -563,12 +652,21 @@ class Application:
 
     def text_area(self, parent, height=8):
         frame = self.ttk.Frame(parent)
-        text = NFCText(frame, wrap='word', height=height, width=1, font=('맑은 고딕', 10))
+        text = NFCText(frame, wrap='word', height=height, width=1, font='SunValleyBodyFont')
         self.theme.refresh(text)
         scroll = self.ttk.Scrollbar(frame, command=text.yview)
         text.configure(yscrollcommand=scroll.set)
         text.pack(side='left', fill='both', expand=True); scroll.pack(side='right', fill='y')
         return frame, text
+
+    def footer(self, parent, *buttons):
+        """Dialog footer in the status-bar surface; buttons are (label, command, accent)."""
+        sp = self.theme.space
+        bar = self.ttk.Frame(parent, style='Status.TFrame', padding=(sp('l'), sp('m')))
+        for label, command, accent in reversed(buttons):
+            self.ttk.Button(bar, text=label, command=command,
+                            style='Accent.TButton' if accent else 'TButton').pack(side='right', padx=(sp('s'), 0))
+        return bar
 
     def copy_text(self, value):
         self.window.clipboard_clear(); self.window.clipboard_append(value)
@@ -582,8 +680,9 @@ class Application:
         skipped = list(skipped) + self.pending_results; self.pending_results = []
         if not offers:
             self.results_dialog(skipped); return
+        sp = self.theme.space
         view = self.tk.Toplevel(self.window); self.resolution_view = view
-        view.title('Markdown 충돌 해결'); view.geometry('640x500'); view.minsize(480, 360)
+        view.title('Markdown 충돌 해결'); self.size(view, 640, 500, 480, 360)
         view.transient(self.window); view.grab_set(); self.controls()
         view.columnconfigure(0, weight=1); view.rowconfigure(1, weight=1, minsize=35)
         choice = self.tk.StringVar(view, value='preserve-vault')
@@ -591,17 +690,17 @@ class Application:
                  '작성 영역을 구분할 수 있는 문서는 사용자 메모를 유지합니다.\n'
                  '구형 문서나 경계가 손상된 문서는 전체를 보관한 뒤 필요한 메모를 새 파일로 직접 옮겨야 합니다.')
         intro_frame, intro_text = self.text_area(view, height=4)
-        intro_frame.grid(row=0, column=0, sticky='ew', padx=12, pady=8)
+        intro_frame.grid(row=0, column=0, sticky='ew', padx=sp('l'), pady=(sp('l'), sp('s')))
         intro_text.insert('end', intro + '\n삼성노트 버전 사용은 생성 영역의 수정을 버립니다.'); intro_text.configure(state='disabled')
-        frame, text = self.text_area(view, height=6); frame.grid(row=1, column=0, sticky='nsew', padx=12)
+        frame, text = self.text_area(view, height=6); frame.grid(row=1, column=0, sticky='nsew', padx=sp('l'))
         for key, request in offers.items():
-            text.insert('end', f'{self.notes.get(key, {}).get("name", key)} · 누락 {", ".join(sorted(request["missing"])) or "없음"}\n')
+            text.insert('end', f'{self.notes.get(key, {}).get("name", key)}: 누락 {", ".join(sorted(request["missing"])) or "없음"}\n')
         for result in skipped:
             text.insert('end', f'제외: {self.notes.get(result["source"], {}).get("name", result["source"])}\n{result.get("user_message", "실행 조건을 확인하세요.")}\n')
         text.configure(state='disabled')
-        self.ttk.Radiobutton(view, text='Vault 수정본 보관 후 재개 (권장)', variable=choice, value='preserve-vault').grid(row=2, column=0, sticky='w', padx=12, pady=5)
+        self.ttk.Radiobutton(view, text='Vault 수정본 보관 후 재개 (권장)', variable=choice, value='preserve-vault').grid(row=2, column=0, sticky='w', padx=sp('l'), pady=(sp('m'), sp('xs')))
         self.ttk.Radiobutton(view, text='삼성노트 버전 사용', variable=choice, value='use-source',
-                             state='normal' if all(r['use_source'] for r in offers.values()) else 'disabled').grid(row=3, column=0, sticky='w', padx=12)
+                             state='normal' if all(r['use_source'] for r in offers.values()) else 'disabled').grid(row=3, column=0, sticky='w', padx=sp('l'), pady=(0, sp('m')))
         def close():
             self.resolution_view = None; view.destroy(); self.controls()
         def apply():
@@ -610,39 +709,41 @@ class Application:
             close(); self.controller.resolve(requests, skipped); self.controls()
         view.protocol('WM_DELETE_WINDOW', close)
         label = '선택 적용 및 누락 파일 재생성 동의' if any(r['missing'] for r in offers.values()) else '선택 적용'
-        self.ttk.Button(view, text=label, command=apply).grid(row=4, column=0, sticky='ew', padx=12, pady=8)
-        self.ttk.Button(view, text='나중에 결정', command=close).grid(row=5, column=0, pady=(0, 10))
+        self.footer(view, ('나중에 결정', close, False), (label, apply, True)).grid(row=4, column=0, sticky='ew')
 
     def results_dialog(self, results):
         if self.closing: return
-        view = self.tk.Toplevel(self.window); view.title('문서 처리 결과'); view.geometry('680x500'); view.minsize(480, 360)
+        sp = self.theme.space
+        view = self.tk.Toplevel(self.window); view.title('문서 처리 결과'); self.size(view, 680, 500, 480, 360)
         view.columnconfigure(0, weight=1); view.rowconfigure(1, weight=1)
         successful = {'synced', 'managed', 'retired', '관리 재개', '관리 중단'}
-        failed = {'error', 'failed', 'conflict'}
-        done = sum(r['status'] in successful for r in results); errors = sum(r['status'] in failed for r in results)
-        self.ttk.Label(view, text=f'완료 {done}개 · 보류 {len(results)-done-errors}개 · 실패/확인 필요 {errors}개').grid(row=0, column=0, sticky='w', padx=12, pady=10)
-        frame = self.ttk.Frame(view); frame.grid(row=1, column=0, sticky='nsew', padx=12)
+        failures = {'error', 'failed', 'conflict'}
+        done = sum(r['status'] in successful for r in results); errors = sum(r['status'] in failures for r in results)
+        self.ttk.Label(view, text=f'완료 {done}개, 보류 {len(results)-done-errors}개, 실패 또는 확인 필요 {errors}개',
+                       style='Section.TLabel').grid(row=0, column=0, sticky='w', padx=sp('l'), pady=(sp('l'), sp('s')))
+        frame = self.ttk.Frame(view); frame.grid(row=1, column=0, sticky='nsew', padx=sp('l'))
         tree = self.ttk.Treeview(frame, columns=('name', 'result'), show='headings', selectmode='browse')
         for col, label in (('name', '문서'), ('result', '결과')):
-            tree.heading(col, text=label); tree.column(col, width=220, minwidth=80)
+            tree.heading(col, text=label, anchor='w'); tree.column(col, width=220, minwidth=80)
         scroll = self.ttk.Scrollbar(frame, command=tree.yview); tree.configure(yscrollcommand=scroll.set)
         tree.pack(side='left', fill='both', expand=True); scroll.pack(side='right', fill='y')
         for i, result in enumerate(results):
             tree.insert('', 'end', iid=str(i), values=(display(self.notes.get(result['source'], {}).get('name', result['source'])), display(STATUS.get(result['status'], result['status']))))
-        message_frame, message = self.text_area(view, height=3); message_frame.grid(row=2, column=0, sticky='ew', padx=12, pady=6)
-        buttons = self.ttk.Frame(view); buttons.grid(row=3, column=0, sticky='ew', padx=12)
+        message_frame, message = self.text_area(view, height=3); message_frame.grid(row=2, column=0, sticky='ew', padx=sp('l'), pady=sp('s'))
+        buttons = self.ttk.Frame(view); buttons.grid(row=3, column=0, sticky='ew', padx=sp('l'))
         def current():
             return results[int(tree.selection()[0])] if tree.selection() else {}
         for i, (label, action) in enumerate((('보존본 열기', lambda: self.open_path(current()['copy'])),
                                              ('파일 위치 열기', lambda: self.open_path(current()['copy'], True)),
                                              ('경로 복사', lambda: self.copy_text(current()['copy'])))):
             button = self.ttk.Button(buttons, text=label, command=action, state='disabled')
-            button.grid(row=0, column=i, sticky='ew', padx=(0, 4)); buttons.columnconfigure(i, weight=1)
+            button.grid(row=0, column=i, sticky='w', padx=(0, sp('xs')))
         technical, raw = self.text_area(view, height=5)
         def toggle_technical():
             if technical.winfo_manager(): technical.grid_remove()
-            else: technical.grid(row=5, column=0, sticky='ew', padx=12, pady=6)
-        self.ttk.Button(view, text='기술 정보 펼치기/접기', command=toggle_technical).grid(row=4, column=0, sticky='w', padx=12, pady=6)
+            else: technical.grid(row=5, column=0, sticky='ew', padx=sp('l'), pady=sp('s'))
+        self.ttk.Button(view, text='기술 정보 펼치기/접기', command=toggle_technical).grid(row=4, column=0, sticky='w', padx=sp('l'), pady=sp('s'))
+        self.footer(view, ('닫기', view.destroy, False)).grid(row=6, column=0, sticky='ew')
         def selected(event=None):
             result = current()
             message.configure(state='normal'); message.delete('1.0', 'end')
@@ -681,9 +782,10 @@ class Application:
 
     def details(self, global_view=False):
         if self.closing: return
-        view = self.tk.Toplevel(self.window); view.title('전역 진단·로그' if global_view else '문제 자세히 보기'); view.geometry('680x520'); view.minsize(480, 360)
+        sp = self.theme.space
+        view = self.tk.Toplevel(self.window); view.title('진단 및 로그' if global_view else '문제 자세히 보기'); self.size(view, 680, 520, 480, 360)
         keys = [] if global_view else sorted(self.checked_targets())
-        frame, text = self.text_area(view, height=9); frame.pack(fill='both', expand=True, padx=12, pady=10)
+        frame, text = self.text_area(view, height=9); frame.pack(fill='both', expand=True, padx=sp('l'), pady=(sp('l'), sp('s')))
         for key in keys:
             text.insert('end', f'{self.notes[key]["name"]}\n{guidance(self.notes[key], self.observation(key))}\n\n')
         if not keys: text.insert('end', f'{self.banner.get()}\n{self.status_summary.get()}\n{self.result_count.get()}\n{self.close_hint.get()}\n전체 기록과 경로는 아래 기술 정보에서 확인하세요.')
@@ -698,52 +800,61 @@ class Application:
         raw_technical = ''.join(raw_parts)
         raw.insert('end', raw_technical)
         raw.configure(state='disabled')
-        if global_view: technical.pack(fill='both', expand=True, padx=12, pady=5)
+        footer = self.footer(view, ('닫기', view.destroy, False))
+        footer.pack(side='bottom', fill='x')
+        tools = self.ttk.Frame(view); tools.pack(side='bottom', fill='x', padx=sp('l'), pady=(sp('xs'), sp('m')))
+        if global_view: technical.pack(fill='both', expand=True, padx=sp('l'), pady=sp('xs'))
         def toggle():
             if technical.winfo_manager(): technical.pack_forget()
-            else: technical.pack(fill='both', expand=True, padx=12, pady=5)
-        self.ttk.Button(view, text='기술 정보 펼치기/접기', command=toggle).pack(anchor='w', padx=12)
-        tools = self.ttk.Frame(view); tools.pack(fill='x', padx=12, pady=8)
-        self.ttk.Button(tools, text='기술 정보 복사', command=lambda: self.copy_text(raw_technical)).grid(row=0, column=0, sticky='ew')
-        self.ttk.Button(tools, text='백업 내 경로 복사', command=lambda: self.copy_text('\n'.join(keys)), state='normal' if keys else 'disabled').grid(row=0, column=1, sticky='ew', padx=4)
-        self.ttk.Button(tools, text='경로 진단', command=lambda: self.diagnose_paths(keys), state='normal' if self.config and not self.controller.busy else 'disabled').grid(row=1, column=0, sticky='ew', pady=4)
+            else: technical.pack(fill='both', expand=True, padx=sp('l'), pady=sp('xs'), before=tools)
+        self.ttk.Button(view, text='기술 정보 펼치기/접기', command=toggle).pack(anchor='w', padx=sp('l'), before=tools)
+        self.ttk.Button(tools, text='기술 정보 복사', command=lambda: self.copy_text(raw_technical)).grid(row=0, column=0, sticky='w')
+        self.ttk.Button(tools, text='백업 내 경로 복사', command=lambda: self.copy_text('\n'.join(keys)), state='normal' if keys else 'disabled').grid(row=0, column=1, sticky='w', padx=(sp('xs'), 0))
+        self.ttk.Button(tools, text='경로 진단', command=lambda: self.diagnose_paths(keys), state='normal' if self.config and not self.controller.busy else 'disabled').grid(row=0, column=2, sticky='w', padx=(sp('xs'), 0))
         copies = [{'source': key, 'status': 'synced', 'copy': self.notes[key]['last_preserved_copy']} for key in (self.notes if global_view else keys) if self.notes[key].get('last_preserved_copy')]
-        self.ttk.Button(tools, text='최근 보존본 보기', command=lambda: self.results_dialog(copies), state='normal' if copies else 'disabled').grid(row=1, column=1, sticky='ew', padx=4)
-        for col in (0, 1): tools.columnconfigure(col, weight=1)
+        self.ttk.Button(tools, text='최근 보존본 보기', command=lambda: self.results_dialog(copies), state='normal' if copies else 'disabled').grid(row=0, column=3, sticky='w', padx=(sp('xs'), 0))
 
     def diagnose_paths(self, keys):
         from tkinter import messagebox
         if self.controller.busy or not self.config or self.closing: return
-        message = ('환경 버전, 경로 정규화 여부, 존재·접근 결과와 실패 단계를 확인합니다.\n'
+        message = ('환경 버전, 경로 정규화 여부, 존재 및 접근 결과와 실패 단계를 확인합니다.\n'
                    '선택 문서는 임시 사본을 만들어 디코딩까지 검사하며 원본과 저장 파일은 변경하지 않습니다.\n'
-                   '기본 결과에는 경로·문서명·코드포인트를 넣지 않습니다. 원문은 별도로 선택해 복사할 수 있습니다.\n\n실행할까요?')
+                   '기본 결과에는 경로, 문서명, 코드포인트를 넣지 않습니다. 원문은 별도로 선택해 복사할 수 있습니다.\n\n실행할까요?')
         if messagebox.askyesno('경로 진단', message, parent=self.window):
             self.controller.diagnose_paths(keys, dict(self.selected_paths), self.window.tk.call('info', 'patchlevel'))
             self.controls()
 
     def diagnostics_dialog(self, report):
         if self.closing: return
-        view = self.tk.Toplevel(self.window); view.title('경로 진단 결과'); view.geometry('640x480')
-        frame, text = self.text_area(view); frame.pack(fill='both', expand=True, padx=12, pady=10)
+        sp = self.theme.space
+        view = self.tk.Toplevel(self.window); view.title('경로 진단 결과'); self.size(view, 640, 480, 480, 360)
+        frame, text = self.text_area(view); frame.pack(fill='both', expand=True, padx=sp('l'), pady=(sp('l'), sp('s')))
         basic = json.dumps({key: value for key, value in report.items() if key != 'raw'}, ensure_ascii=False, indent=2)
         text.insert('end', basic); text.configure(state='disabled')
-        self.ttk.Button(view, text='기본 결과 복사 (경로 제외)', command=lambda: self.copy_text(basic)).pack(pady=4)
         def copy_raw():
             from tkinter import messagebox
             if messagebox.askyesno('원문 경로 포함', '개인 경로와 문서명이 포함됩니다. 원문도 복사할까요?', parent=view):
                 self.copy_text(json.dumps(report, ensure_ascii=False, indent=2))
-        self.ttk.Button(view, text='원문 경로 포함 복사…', command=copy_raw).pack(pady=(0, 10))
+        self.footer(view, ('기본 결과 복사 (경로 제외)', lambda: self.copy_text(basic), False),
+                    ('원문 경로 포함 복사…', copy_raw, False), ('닫기', view.destroy, False)).pack(side='bottom', fill='x')
 
     def update_state(self, state):
+        from datetime import datetime
         focus, scroll = self.tree.focus(), self.tree.yview()
         self.notes = state['notes']; self.observations = state.get('observations', {})
-        counts = {key: 0 for key in GROUPS}; visible = []
+        counts = {key: 0 for key in GROUPS}; visible = []; self.status_texts = {}
+        chips = {'확인 필요': 0, '실패': 0}
         for key, entry in self.notes.items():
             item = self.observation(key); category = group(entry, item)
             if item.get('excluded') and category != 'retired': continue
             counts[category] += 1
+            if category == self.group and self.group != 'retired':
+                if failed(entry): chips['실패'] += 1
+                elif needs_attention(entry, item): chips['확인 필요'] += 1
             if category == self.group and matches(key, entry, item, self.search.get(), self.state_filter.get()): visible.append(key)
+        self.chip_counts = chips
         self.checked.intersection_update(visible)
+        now = datetime.now().astimezone()
         self.selecting = True
         try:
             visible_set = set(visible)
@@ -751,13 +862,12 @@ class Application:
                 if iid not in visible_set: self.tree.delete(iid)
             for index, key in enumerate(visible):
                 entry = self.notes[key]
-                status = status_text(entry, self.observation(key))
                 item = self.observation(key)
                 attention = self.group != 'retired' and needs_attention(entry, item)
-                mark = ('·' if self.group == 'retired' else '△' if attention else
-                        '◷' if entry['status'] in PENDING else
-                        '✓' if entry['status'] == 'synced' and item.get('source_exists') is True else '·')
-                values = ('☑' if key in self.checked else '☐', display('/'.join(p for p in (entry.get('folder', ''), entry['name']) if p)), display(mark + '  ' + status))
+                # The status cell is drawn as an icon; its words live in the tooltip only.
+                self.status_texts[key] = display(status_text(entry, item))
+                values = ('☑' if key in self.checked else '☐', display('/'.join(p for p in (entry.get('folder', ''), entry['name']) if p)),
+                          '', format_time(synced_at(entry), now))
                 tags = ('attention',) if attention else ()
                 if self.tree.exists(key): self.tree.item(key, values=values, tags=tags); self.tree.move(key, '', index)
                 else: self.tree.insert('', 'end', iid=key, values=values, tags=tags)
@@ -766,17 +876,42 @@ class Application:
             elif visible: self.tree.focus(visible[0])
             if scroll: self.tree.yview_moveto(scroll[0])
             self.group_counts = counts; self.group_labels()
-            self.result_count.set(f'검색 결과 {len(visible)}개 · {GROUPS[self.group]} {counts[self.group]}개')
+            self.result_count.set(f'검색 결과 {len(visible)}개')
             self.summary = document_summary(self.notes, self.observations)
+            self.track_run()
             self.refresh_checks()
         finally: self.selecting = False
+        self.update_empty(visible, counts)
         if not self.failed and not self.closing:
             self.banner.set(self.issue_summary())
         self.status_cells.queue()
 
+    def track_run(self):
+        """Progress and current documents from note states; the engine is unchanged."""
+        from datetime import datetime
+        pending = {key for key, entry in self.notes.items() if entry.get('status') in PENDING}
+        if self.controller.busy and pending:
+            self.run_keys |= pending
+        elif self.run_keys and not pending:
+            self.last_sync = datetime.now().astimezone(); self.run_keys = set()
+        self.working_names = [display(entry['name']) for entry in self.notes.values() if entry.get('status') in WORKING]
+        self.latest_success = max((t for t in map(synced_at, self.notes.values()) if t), default=None)
+
+    def update_empty(self, visible, counts):
+        if visible:
+            self.empty_label.place_forget(); return
+        if not self.config:
+            text = '설정에서 삼성노트 백업과 저장 폴더를 선택하면\n문서가 여기에 표시됩니다.'
+        elif counts.get(self.group):
+            text = '조건에 맞는 문서가 없습니다.'
+        else:
+            text = f'{GROUPS[self.group]}에 해당하는 문서가 없습니다.'
+        self.empty_text.set(text)
+        self.empty_label.place(relx=.5, rely=.5, anchor='center')
+
     def issue_summary(self):
         if self.summary['unavailable']:
-            return '백업/Vault 접근 미확인 · 설정에서 경로와 연결 상태를 확인하세요.'
+            return '백업/Vault 접근 미확인. 설정에서 경로와 연결 상태를 확인하세요.'
         return ''
 
     def show(self):
@@ -797,7 +932,7 @@ class Application:
     def error(self, message):
         self.failed = True; self.log_lines.append(message); self.log_lines = self.log_lines[-100:]
         if self.closing: return
-        self.banner.set('작업을 완료하지 못했습니다. 메뉴 → 전역 진단·로그에서 확인하세요.')
+        self.banner.set('작업을 완료하지 못했습니다. 메뉴의 진단 및 로그에서 확인하세요.')
         if self.settings_dialog:
             self.settings_dialog.saving = False; self.settings_dialog.set_enabled(True)
             self.settings_dialog.message.set('설정을 저장하지 못했습니다. 기술 정보에서 오류를 확인하고 다시 시도하세요.')
@@ -841,6 +976,9 @@ class Application:
                 elif kind in ('exit', 'session_end'): self.exit(session_end=kind == 'session_end')
                 elif kind == 'initialized': self.initialized = True
                 elif kind == 'finished':
+                    if value in ('sync', 'setup', 'watch') and not self.failed:
+                        from datetime import datetime
+                        self.last_sync = datetime.now().astimezone()
                     if value == 'initialize':
                         self.initialized = True
                         if not self.closing:
@@ -874,8 +1012,13 @@ def main(argv=None):
     import tkinter as tk
     from tkinter import messagebox
     from . import windows_desktop as native
+    from .gui_layout import enable_dpi_awareness
+    # Draw at the monitor's real DPI instead of letting Windows stretch a 96 DPI bitmap.
+    dpi_aware = enable_dpi_awareness()
     window = tk.Tk()
     window.withdraw()
+    if dpi_aware:
+        window.tk.call('tk', 'scaling', window_dpi(window)/72)
     controller = DesktopController(state_directory())
     tray = None
     try:
@@ -895,7 +1038,7 @@ def main(argv=None):
                 tray.start()
             except OSError as error:
                 controller.events.put(('tray_error', str(error)))
-        Application(window, controller, native, tray, startup=args.startup)
+        Application(window, controller, native, tray, startup=args.startup, dpi_aware=dpi_aware)
         if not args.startup or not tray or not tray.visible: window.deiconify()
         window.mainloop()
     except Exception as error:

@@ -77,7 +77,7 @@ class NFCText(tk.Text):
 def ask_name(parent, initial):
     class NameDialog(simpledialog.Dialog):
         def body(self, master):
-            ttk.Label(master, text='새 파일 이름 (확장자 제외)\n기존 PDF·Markdown은 그대로 남고 새 이름이 관리 대상이 됩니다.\n기존 사용자 메모는 새 파일로 자동 이전되지 않습니다.').pack()
+            ttk.Label(master, text='새 파일 이름 (확장자 제외)\n기존 PDF와 Markdown은 그대로 남고 새 이름이 관리 대상이 됩니다.\n기존 사용자 메모는 새 파일로 자동 이전되지 않습니다.').pack()
             self.name = NFCStringVar(master, initial)
             entry = ttk.Entry(master, textvariable=self.name, width=45)
             entry.pack(fill='x', pady=8)

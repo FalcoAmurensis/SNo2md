@@ -91,7 +91,7 @@ class WindowsTray:
 
     def _icon_data(self):
         return (self.hwnd, 0, self.gui.NIF_ICON | self.gui.NIF_MESSAGE | self.gui.NIF_TIP,
-                self.callback_message, self.icon, 'SNo2md — 삼성노트 동기화')
+                self.callback_message, self.icon, 'SNo2md 삼성노트 동기화')
 
     def _add_icon(self):
         self.gui.Shell_NotifyIcon(self.gui.NIM_ADD, self._icon_data())

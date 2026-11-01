@@ -66,7 +66,7 @@ def summary(rules):
         return '모든 폴더 (휴지통 포함)'
     if overrides == {TRASH: False}:
         return '모든 폴더 (휴지통 제외)'
-    return '전체 폴더 · 일부 제외' if not all(overrides.values()) else '모든 폴더 (휴지통 포함)'
+    return '전체 폴더, 일부 제외' if not all(overrides.values()) else '모든 폴더 (휴지통 포함)'
 
 
 def inventory(backup, found=None):

@@ -134,7 +134,7 @@ class DesktopController:
                     item = engine.observations[key]
                     message = ('폴더 선택에서 제외됨' if item.get('excluded') else
                                '원본 없음: 다시 생성할 수 없음' if not item.get('source_exists') else
-                               entry.get('error') or '사용자 메모 보존 · 자동 관리 중')
+                               entry.get('error') or '사용자 메모 보존, 자동 관리 중')
                     results.append({'source': key, 'status': entry['status'], 'message': message})
                 self.results(results)
 

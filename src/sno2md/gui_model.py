@@ -8,7 +8,7 @@ STATUS = {'deferred': '보류', 'failed': '처리 실패', 'missing_output': '�
           'managed': '관리 재개', 'retired': '관리 중단'}
 GROUPS = {'active': '내 문서', 'source_missing': '원본 없음',
           'output_missing': '저장 파일 없음', 'retired': '관리 중단'}
-FILTERS = ('전체', '최신 상태', '대기·진행 중', '확인 필요')
+FILTERS = ('전체', '최신 상태', '처리 중', '확인 필요', '실패')
 PENDING = {'pending', 'waiting', 'queued', 'converting', 'ready_to_publish'}
 RETRYABLE = {'error', 'conflict', 'missing', 'pending', 'waiting'}
 
@@ -24,6 +24,10 @@ def execution(busy, kind, stopping):
 def close_action(busy, kind, stopping, tray):
     mode = execution(busy, kind, stopping)
     return ('hide' if tray else 'confirm') if mode == 'watch' else 'exit'
+
+
+def failed(entry):
+    return entry.get('status') in ('error', 'failed')
 
 
 def needs_attention(entry, item):
@@ -54,9 +58,11 @@ def matches(key, entry, item, query, state_filter):
         return False
     if state_filter == '최신 상태':
         return entry.get('status') == 'synced' and not needs_attention(entry, item)
-    if state_filter == '대기·진행 중':
+    if state_filter == '처리 중':
         return entry.get('status') in PENDING
-    return needs_attention(entry, item) if state_filter == '확인 필요' else True
+    if state_filter == '실패':
+        return failed(entry)
+    return needs_attention(entry, item) and not failed(entry) if state_filter == '확인 필요' else True
 
 
 def eligible(action, entry, item):
@@ -129,11 +135,36 @@ def guidance(entry, item):
 def status_text(entry, item):
     label = STATUS.get(entry.get('status'), '상태 확인 필요')
     if item.get('missing'):
-        label += ' · ' + '/'.join(ext.upper() for ext in item['missing']) + ' 없음'
+        label += ', ' + '/'.join(ext.upper() for ext in item['missing']) + ' 없음'
     if item.get('source_exists') is False and entry.get('status') != 'missing':
-        label += ' · 백업 없음'
+        label += ', 백업 없음'
     if item.get('conflicts') and entry.get('status') != 'conflict':
-        label += ' · 수정 확인'
+        label += ', 수정 확인'
     if item.get('unavailable'):
-        label += ' · 접근 미확인'
+        label += ', 접근 미확인'
     return label
+
+
+def synced_at(entry):
+    """Last successful publication time recorded by the engine, as an aware datetime."""
+    from datetime import datetime
+    value = (entry.get('success') or {}).get('at')
+    try:
+        return datetime.fromisoformat(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def format_time(moment, now=None):
+    """Short local date for lists and the status bar: 오늘 14:32, 어제 21:07, 10월 30일 18:40."""
+    from datetime import datetime
+    if moment is None:
+        return ''
+    local = moment.astimezone() if moment.tzinfo else moment
+    now = now or datetime.now().astimezone()
+    days = (now.date() - local.date()).days
+    clock = local.strftime('%H:%M')
+    if days == 0: return f'오늘 {clock}'
+    if days == 1: return f'어제 {clock}'
+    if local.year == now.year: return f'{local.month}월 {local.day}일 {clock}'
+    return f'{local.year}년 {local.month}월 {local.day}일'

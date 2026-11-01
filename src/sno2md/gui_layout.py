@@ -26,6 +26,47 @@ def client_limit(window):
     return max(1, right-left-frame_x), max(1, bottom-top-frame_y)
 
 
+def enable_dpi_awareness():
+    """Opt this process into per-monitor DPI; returns whether it is DPI aware.
+
+    Call before the first Tk window exists. Changes only this process.
+    """
+    if sys.platform != 'win32':
+        return False
+    import ctypes
+    user32 = ctypes.WinDLL('user32')
+    try:
+        user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # PER_MONITOR_AWARE_V2
+    except (AttributeError, OSError):
+        try: ctypes.WinDLL('shcore').SetProcessDpiAwareness(2)
+        except (AttributeError, OSError): return False
+    try:
+        user32.GetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        user32.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        # A manifest may already have chosen awareness; either way report the result.
+        return user32.GetAwarenessFromDpiAwarenessContext(user32.GetThreadDpiAwarenessContext()) > 0
+    except (AttributeError, OSError):
+        return False
+
+
+def window_dpi(window):
+    """The DPI Windows reports for the monitor that holds the window (96 elsewhere)."""
+    if sys.platform != 'win32':
+        return 96
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL('user32')
+    try:
+        user32.GetParent.argtypes = [wintypes.HWND]
+        user32.GetParent.restype = wintypes.HWND
+        user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+        hwnd = user32.GetParent(window.winfo_id()) or window.winfo_id()
+        return user32.GetDpiForWindow(hwnd) or user32.GetDpiForSystem() or 96
+    except (AttributeError, OSError):
+        return 96
+
+
 def elide(text, width, measure):
     """Bound a single-line presentation without discarding its original value."""
     if measure(text) <= width: return text

@@ -24,11 +24,14 @@ class FolderDialog:
         self.loading = False
         self.message = NFCStringVar(self.window)
         self.last_error = ''
+        # Same spacing steps and footer surface as the settings window (16/12/8/4 px).
+        actions = ttk.Frame(self.window, style='Status.TFrame', padding=(16, 12))
+        actions.pack(side='bottom', fill='x')
         info = ttk.Label(self.window, textvariable=self.message, wraplength=530)
-        info.pack(fill='x', padx=12, pady=10)
+        info.pack(fill='x', padx=16, pady=(16, 8))
         info.bind('<Configure>', lambda e: info.configure(wraplength=max(180, e.width)))
         frame = ttk.Frame(self.window)
-        frame.pack(fill='both', expand=True, padx=12)
+        frame.pack(fill='both', expand=True, padx=16, pady=(0, 12))
         self.tree = ttk.Treeview(frame, show='tree', selectmode='browse')
         scroll = ttk.Scrollbar(frame, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -36,18 +39,16 @@ class FolderDialog:
         scroll.pack(side='right', fill='y')
         self.tree.bind('<Button-1>', self.click)
         self.tree.bind('<space>', self.space)
-        actions = ttk.Frame(self.window)
-        actions.pack(fill='x', padx=12, pady=12)
         self.buttons = []
         for label, command in [('전체 선택', lambda: self.all(True)), ('전체 해제', lambda: self.all(False)),
                                ('새로고침', self.refresh), ('적용', self.apply)]:
-            button = ttk.Button(actions, text=label, command=command)
-            button.grid(row=len(self.buttons)//3, column=len(self.buttons)%3, sticky='ew', padx=2, pady=2)
+            button = ttk.Button(actions, text=label, command=command, style='Accent.TButton' if label == '적용' else 'TButton')
             self.buttons.append(button)
-        for column in range(3): actions.columnconfigure(column, weight=1)
         self.error_button = ttk.Button(actions, text='기술 정보', command=self.show_error, state='disabled')
-        self.error_button.grid(row=1, column=1, sticky='ew', padx=2)
-        ttk.Button(actions, text='취소', command=self.close).grid(row=1, column=2, sticky='ew', padx=2)
+        for button in (*self.buttons[:3], self.error_button):
+            button.pack(side='left', padx=(0, 4))
+        self.buttons[3].pack(side='right')
+        ttk.Button(actions, text='취소', command=self.close).pack(side='right', padx=(0, 8))
         self.window.protocol('WM_DELETE_WINDOW', self.close)
         self.refresh()
         self.window.after(100, self.poll)
@@ -72,7 +73,7 @@ class FolderDialog:
                 self.data = result
                 self.last_error = ''
                 self.error_button.configure(state='disabled')
-                self.message.set(result['basis'] + ' · 선택하지 않은 폴더도 이미 저장한 파일은 삭제하지 않습니다.')
+                self.message.set(result['basis'] + '\n선택하지 않은 폴더도 이미 저장한 파일은 삭제하지 않습니다.')
                 self.render()
             else:
                 self.data = None
