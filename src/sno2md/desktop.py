@@ -78,7 +78,8 @@ class DesktopController:
         self.events.put(('locations', candidates))
         self.events.put(('initialized', None))
 
-    def save_settings(self, backup, vault, width_scale, start_on_login, native, workers='auto', folder_rules=None):
+    def save_settings(self, backup, vault, width_scale, start_on_login, native, workers='auto', folder_rules=None,
+                      image_storage='external', review_images=True, repeat_distance=8):
         with store_lock(self.root):
             from .app_reset import finish_reset
             finish_reset(self.root)
@@ -88,11 +89,13 @@ class DesktopController:
                 config = change_paths(self.root, config, backup, vault)
                 if (self.root/'journal.json').exists():
                     recover(self.root, load_config(self.root), load_state(self.root))
-                config = dict(config, width_scale=width_scale, workers=workers)
+                config = dict(config, width_scale=width_scale, workers=workers, image_storage=image_storage,
+                              review_images=review_images, repeat_distance=repeat_distance)
                 from .sync_config import validate_config
                 validate_config(self.root, config)
             else:
-                config = new_config(self.root, backup, vault, width_scale=width_scale, workers=workers)
+                config = new_config(self.root, backup, vault, width_scale=width_scale, workers=workers,
+                                    image_storage=image_storage, review_images=review_images, repeat_distance=repeat_distance)
             if folder_rules is not None:
                 from .sync_config import pair_key
                 config['folder_selections'] = dict(config.get('folder_selections', {}))

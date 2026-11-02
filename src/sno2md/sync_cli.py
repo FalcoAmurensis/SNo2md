@@ -1,5 +1,6 @@
 """Phase 3 CLI. All persistent paths are selected explicitly during setup."""
 import argparse
+import json
 from pathlib import Path
 import sys
 import signal
@@ -36,6 +37,8 @@ def setup(root, args):
     vault = args.vault or choose('Obsidian Vault', obsidian_vaults(args.obsidian_config, args.windows_profile))
     config = new_config(root, backup, vault, width_scale=args.width_scale, mode=args.mode,
                         poll=args.poll, settle=args.settle, workers=args.workers, wait_timeout=args.wait_timeout,
+                        image_storage=args.image_storage,
+                        repeat_distance=args.repeat_distance, review_images=not args.no_image_review,
                         registry=args.obsidian_config or obsidian_registry(args.windows_profile))
     with store_lock(root):
         create_config(root, config)
@@ -61,8 +64,16 @@ def main(argv=None):
     setup_parser.add_argument('--settle', type=duration, default=3.0)
     setup_parser.add_argument('--workers', type=worker_count, default='auto')
     setup_parser.add_argument('--wait-timeout', type=float, default=300.0)
+    setup_parser.add_argument('--image-storage', choices=('external', 'embedded'), default='external')
+    setup_parser.add_argument('--repeat-distance', type=int, default=8)
+    setup_parser.add_argument('--no-image-review', action='store_true')
     commands.add_parser('scan', help='Read-only discovery of supported archives/note folders')
     commands.add_parser('status', help='Show registered notes and last known status')
+    review=commands.add_parser('image-review',help='List image groups, approve hiding, or revoke reusable rules')
+    review.add_argument('--document',help='Document ID from this review list')
+    review.add_argument('--groups',nargs='+',help='Group IDs to decide together')
+    review.add_argument('--choice',choices=('hide','global','keep','clear'))
+    review.add_argument('--revoke',nargs='+',help='Rule IDs to revoke')
     for name in ('run', 'watch'):
         command = commands.add_parser(name, help='Sync once' if name == 'run' else 'Poll and sync until Ctrl+C')
         command.add_argument('--workers', type=worker_count, help='Override auto or 1..8 for this run')
@@ -86,6 +97,9 @@ def main(argv=None):
     settings.add_argument('--settle', type=duration)
     settings.add_argument('--workers', type=worker_count)
     settings.add_argument('--wait-timeout', type=float)
+    settings.add_argument('--image-storage', choices=('external', 'embedded'))
+    settings.add_argument('--repeat-distance', type=int)
+    settings.add_argument('--image-review', choices=('on','off'))
     add = commands.add_parser('add', help='Register selected source keys in manual mode')
     add.add_argument('sources', nargs='*')
     rename = commands.add_parser('rename', help='Change output name; existing outputs are retained')
@@ -106,6 +120,19 @@ def main(argv=None):
             return
         if args.command == 'setup':
             setup(root, args)
+            return
+        if args.command == 'image-review':
+            from .image_review import ImageReviewStore
+            store=ImageReviewStore(root/'image-review')
+            if args.choice and args.revoke:raise ValueError('choose a group decision or rule revocation')
+            if args.choice:
+                if not args.document or not args.groups:raise ValueError('--choice requires --document and --groups')
+                with store_lock(root):
+                    for group in args.groups:store.decision(args.document,group,args.choice)
+            elif args.revoke:
+                with store_lock(root):
+                    for rule in args.revoke:store.remove_rule(rule)
+            print(json.dumps(store.snapshot(),ensure_ascii=False,indent=2))
             return
         config = load_config(root)
         state = load_state(root)
@@ -141,9 +168,11 @@ def main(argv=None):
                     config = change_paths(root, config, args.backup or config['backup'], args.vault or config['vault'])
                 for argument, key in (('mode','mode'), ('width_scale','width_scale'),
                                       ('poll','poll_seconds'), ('settle','settle_seconds'),
-                                      ('workers','workers'), ('wait_timeout','wait_timeout')):
+                                      ('workers','workers'), ('wait_timeout','wait_timeout'), ('image_storage','image_storage'),
+                                      ('repeat_distance','repeat_distance')):
                     if getattr(args, argument) is not None: config[key] = getattr(args, argument)
                 ConversionOptions(width_scale=config['width_scale'])
+                if args.image_review is not None:config['review_images']=args.image_review=='on'
                 update_config(root, config)
                 print(config)
             elif args.command == 'add':
@@ -168,7 +197,7 @@ def main(argv=None):
                         print(f'Excluded by folder selection: {key}')
                         continue
                     if key not in state['notes']:
-                        state['notes'][key] = registration(found[key], catalog, state)
+                        state['notes'][key] = registration(found[key], catalog, state, config.get('document_folders', True))
                 save_json(root/'state.json', state)
             elif args.command in ('rename','rebind'):
                 source = args.source if args.command == 'rename' else args.old_source

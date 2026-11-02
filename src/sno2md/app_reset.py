@@ -12,6 +12,12 @@ def finish_reset(root):
     if not pending.exists():return
     base=root.resolve()
     if base==Path(base.anchor):raise Conflict('app state cannot be a filesystem root')
+    reviews=root/'image-review'
+    if reviews.exists():
+        if reviews.is_symlink() or getattr(reviews,'is_junction',lambda:False)() or not reviews.resolve().is_relative_to(base):
+            raise Conflict('image review library escapes app state')
+        from .image_review import ImageReviewStore
+        ImageReviewStore(reviews).reset_documents()
     names=['config.json','state.json','pairs','chunks','resets','reset-outputs.json','reset-ready.json']
     names.extend(p.name for p in root.glob('job-*'))
     for name in names:
@@ -40,6 +46,15 @@ def adopt_output(root,config,entry):
     if not config.get('recreate_outputs'):return
     paths=output_paths(config,entry)
     hashes={ext:file_digest(path) for ext,path in paths.items()}
+    if not any(hashes.values()) and entry.get('document_folders', False):
+        # A disconnected older installation may have flat outputs but no history.
+        # Reconnect to those exact files so their user memos remain recoverable.
+        legacy=dict(entry,document_folders=False)
+        legacy_paths=output_paths(config,legacy)
+        legacy_hashes={ext:file_digest(path) for ext,path in legacy_paths.items()}
+        if any(legacy_hashes.values()):
+            entry['document_folders']=False
+            paths,hashes=legacy_paths,legacy_hashes
     if not any(hashes.values()):return
     baseline=dict(outputs=hashes,input=None,options=None,generator_version='reset',revision=0)
     if hashes['md']:

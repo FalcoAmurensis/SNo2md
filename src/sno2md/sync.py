@@ -127,7 +127,7 @@ def default_name(path):
     return safe_name(note_title(path) or (path.stem if path.is_file() else path.name))
 
 
-def registration(path, catalog, state):
+def registration(path, catalog, state, document_folders=True):
     metadata = catalog.get(str(path.resolve()), {})
     name = safe_name(metadata.get('title') or note_title(path) or (path.stem if path.is_file() else path.name))
     folder = '/'.join(safe_name(part) for part in metadata.get('folders', []))
@@ -136,7 +136,7 @@ def registration(path, catalog, state):
     while (folder.casefold(), name.casefold()) in used:
         name = f'{base} ({suffix})'
         suffix += 1
-    return {'name': name, 'folder': folder, 'status': 'pending', 'error': None}
+    return {'name': name, 'folder': folder, 'document_folders': document_folders, 'status': 'pending', 'error': None}
 
 
 def rename_entry(state, source, name):
@@ -184,8 +184,18 @@ class Synchronizer:
         self.resolution_done = set()
         self.observations = {}
         self.retry_after = {}
-        self.options = {'width_scale': config['width_scale']}
+        self.options = {'width_scale': config['width_scale'], 'image_storage': config.get('image_storage', 'external')}
+        self.options.update(review_images=config.get('review_images', True), repeat_distance=config.get('repeat_distance', 8))
         self.metrics = {}
+
+    def note_options(self,key):
+        from .sync_config import pair_key
+        from .image_review import ImageReviewStore
+        options=dict(self.options)
+        if options['review_images']:
+            identity=note_id(pair_key(self.config)+'\0'+key)
+            options['image_review_revision']=ImageReviewStore(self.root/'image-review').revision(identity)
+        return options
 
     def notify(self):
         if self.on_state is not None:
@@ -347,6 +357,12 @@ class Synchronizer:
     def convert_pending(self, candidates, stop_event):
         if not candidates or stop_event.is_set():
             return
+        if self.config.get('review_images',True):
+            try:
+                from .image_review import ImageReviewStore
+                # Bootstrap once in the coordinator before parallel workers use WAL.
+                with ImageReviewStore(self.root/'image-review').db():pass
+            except Exception as error:self.emit(f'warning: image review initialization unavailable: {error}')
         workers, available = choose_workers(self.config.get('workers', 'auto'), len(candidates))
         self.emit('pool: '+json.dumps({'workers': workers, 'available_bytes': available}))
         pool = ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn'),
@@ -375,7 +391,11 @@ class Synchronizer:
                         identity = note_id(pair_key(self.config)+'\0'+key)
                         job = ConversionJob(str(snapshot), str(work/'output'), self.state['notes'][key]['name'],
                                             self.config['width_scale'], time.perf_counter(),
-                                            str(self.root/'chunks'),identity,value,str(source.resolve()))
+                                            str(self.root/'chunks'),identity,value,str(source.resolve()),
+                                            self.config.get('image_storage', 'external'),
+                                            self.state['notes'][key].get('document_folders', False),
+                                            str(self.root/'image-review'),self.config.get('review_images', True),
+                                            self.config.get('repeat_distance', 8))
                         future = pool.submit(convert_job, job)
                         pending[future] = (key, source, value, work)
                         self.status(key, 'converting')
@@ -398,9 +418,21 @@ class Synchronizer:
                         if self.digest(source) != value:
                             raise InputChanged('input changed during conversion; will retry')
                         # publish_pair repeats ownership/user-edit checks immediately before writing.
+                        published_options=self.note_options(key)
+                        review_report=result.get('image_review_report')
+                        if review_report:
+                            published_options['image_review_revision']=review_report['policy_revision']
                         self.measured('publish', publish_pair, self.root, self.config, self.state,
-                                      key, Path(result['output']), value, self.options,
-                                      self.restore_missing.get(key, False), self.resolutions.get(key))
+                                      key, Path(result['output']), value, published_options,
+                                      self.restore_missing.get(key, False), self.resolutions.get(key),
+                                      result.get('image_assets', {}))
+                        if review_report:
+                            try:
+                                from .image_review import ImageReviewStore
+                                paths=output_paths(self.config,self.state['notes'][key])
+                                ImageReviewStore(self.root/'image-review').commit(review_report,paths['md'],paths['pdf'])
+                            except Exception as error:
+                                self.emit(f'warning: image review index not updated: {error}')
                         if result.get('chunk_stage'):
                             try:
                                 from .sync_config import pair_key
@@ -463,7 +495,7 @@ class Synchronizer:
             catalog = folders['catalog']
             for key, path in found.items():
                 if key in selected and key not in state['notes']:
-                    state['notes'][key] = registration(path, catalog, state)
+                    state['notes'][key] = registration(path, catalog, state, config.get('document_folders', True))
                     from .app_reset import adopt_output
                     adopt_output(self.root,config,state['notes'][key])
                     save_json(self.root/'state.json', state)
@@ -536,7 +568,7 @@ class Synchronizer:
                     self.restore_missing[key] = frozenset(missing)
                 success = entry.get('success', {})
                 if (not missing and key not in self.refresh and success.get('input') == value and
-                        success.get('options') == self.options and
+                        success.get('options') == self.note_options(key) and
                         success.get('generator_version') == GENERATOR_VERSION):
                     from .sync_config import pair_key
                     cache = ChunkCache(self.root/'chunks',identity=note_id(pair_key(config)+'\0'+key))

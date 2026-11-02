@@ -127,6 +127,8 @@ def guidance(entry, item):
             lines.append('작성 영역을 구분할 수 없어 전체 수정본을 보관해야 합니다. 새 파일의 사용자 메모로 필요한 내용을 직접 옮기세요.')
     if 'pdf' in conflicts:
         lines.append('PDF 변경 또는 파일 경로 점유가 발견되었습니다. 파일과 경로를 직접 확인하세요. Markdown 충돌 해결로 덮어쓸 수 없습니다.')
+    if 'images' in conflicts:
+        lines.append('이미지 파일 변경 또는 경로 점유가 발견되었습니다. 수정한 파일을 보관하고 이미지 경로를 확인하세요. 자동으로 덮어쓰지 않습니다.')
     if entry.get('status') in ('error', 'conflict') and not conflicts:
         lines.append('처리가 완료되지 않았습니다. 아래 기술 정보의 원문 오류를 확인한 뒤 다시 시도하세요.')
     return '\n'.join(lines) or STATUS.get(entry.get('status'), '문서 상태를 확인하세요.')

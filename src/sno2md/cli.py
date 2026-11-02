@@ -24,11 +24,16 @@ def main(argv=None):
     parser.add_argument('--width-scale',type=float,default=0.5)
     parser.add_argument('--bundle',action='store_true',help='Export PDF + MD')
     parser.add_argument('--name',help='Output filename stem for --bundle')
+    parser.add_argument('--image-storage', choices=('external', 'embedded'), default='external',
+                        help='Bundle images: separate files (default) or embedded data URIs')
+    parser.add_argument('--repeat-distance', type=int, default=8, help='64-bit pHash distance, 0..32 (default 8)')
+    parser.add_argument('--no-image-review', action='store_true', help='Preserve all images without review analysis')
     args = parser.parse_args(argv)
     if not args.bundle and args.name is not None:
         parser.error('--name requires --bundle')
     try:
-        options = ConversionOptions(width_scale=args.width_scale)
+        options = ConversionOptions(width_scale=args.width_scale, image_storage=args.image_storage,
+                                    review_images=not args.no_image_review, repeat_distance=args.repeat_distance)
         if args.bundle:
             result = export_note(args.source,args.output,name=args.name,options=options)
         else: result = convert_pdf(args.source,args.output,options=options)

@@ -9,6 +9,7 @@ import tempfile
 import time
 from .model import GENERATOR_VERSION
 from .markdown_regions import split, digest, merge
+from .image_assets import asset_folder, checked_asset_path
 
 
 class Conflict(ValueError):
@@ -97,15 +98,31 @@ def output_paths(config, entry):
     vault = Path(config['vault']).resolve()
     folder = entry.get('folder', '')
     parts = folder.split('/') if folder else []
+    if entry.get('document_folders', False):
+        parts.append(name)
     parent = vault
     for part in parts:
         if (not part or part in ('.', '..') or part.endswith((' ', '.'))
                 or any(ord(c) < 32 or c in '\\:*?\"<>|' for c in part)):
             raise ValueError('invalid registered output folder')
         parent = parent/part
-        if parent.is_symlink() or not parent.resolve().is_relative_to(vault):
+        if (parent.is_symlink() or getattr(parent, 'is_junction', lambda: False)()
+                or not parent.resolve().is_relative_to(vault)):
             raise Conflict('output folder escapes Vault or is a symlink')
     return {ext: parent/(name+'.'+ext) for ext in ('pdf', 'md')}
+
+
+def image_paths(config, entry, manifest=None):
+    manifest = entry.get('success', {}).get('image_assets', {}) if manifest is None else manifest
+    parent = output_paths(config, entry)['md'].parent
+    folder = asset_folder(entry['name'], entry.get('document_folders', False))
+    paths = {}
+    for relative, expected in manifest.items():
+        path = checked_asset_path(parent, relative, folder)
+        if path.stem != expected:
+            raise Conflict('managed image name/hash mismatch')
+        paths[relative] = path
+    return paths
 
 
 def inspect_outputs(config, entry):
@@ -141,6 +158,16 @@ def inspect_outputs(config, entry):
                 raise Conflict(f'output changed or occupied: {path}')
         except Conflict as error:
             result['conflicts'][ext] = str(error)
+    try:
+        manifest = entry.get('success', {}).get('image_assets', {})
+        for relative, path in image_paths(config, entry).items():
+            current = file_digest(path)
+            if current is None:
+                if 'images' not in result['missing']: result['missing'].append('images')
+            elif current != manifest[relative]:
+                raise Conflict(f'managed image changed: {path}')
+    except (Conflict, ValueError) as error:
+        result['conflicts']['images'] = str(error)
     return result
 
 
@@ -160,7 +187,7 @@ def validate_outputs(result, entry, allow_missing=False, resolution=None):
     if conflicts:
         raise Conflict('; '.join(conflicts.values()))
     missing = set(result['missing'])
-    permitted = {'pdf', 'md'} if allow_missing is True else (set(allow_missing) if allow_missing else set())
+    permitted = {'pdf', 'md', 'images'} if allow_missing is True else (set(allow_missing) if allow_missing else set())
     if missing - permitted:
         raise MissingOutput(f'managed output missing: {", ".join(sorted(missing))}')
     return missing
@@ -177,7 +204,8 @@ def recover(root, config, state):
     vault = Path(config['vault']).resolve()
     if stage.parent.resolve() != vault or not stage.name.startswith('.sno2md-sync-'):
         raise Conflict('invalid recovery stage location')
-    if journal['name'] != entry['name'] or journal.get('folder', '') != entry.get('folder', ''):
+    if (journal['name'] != entry['name'] or journal.get('folder', '') != entry.get('folder', '')
+            or journal.get('document_folders', False) != entry.get('document_folders', False)):
         raise Conflict('output name changed during pending recovery')
     for ext, path in output_paths(config, entry).items():
         held = stage/'held'/path.name
@@ -216,7 +244,8 @@ def recover(root, config, state):
     shutil.rmtree(stage)
 
 
-def publish_pair(root, config, state, source, generated, fingerprint, options, allow_missing=False, resolution=None):
+def publish_pair(root, config, state, source, generated, fingerprint, options, allow_missing=False, resolution=None,
+                 image_assets=None):
     entry = state['notes'][source]
     if entry.get('sync_policy', 'managed') == 'retired':
         raise Conflict('document management is stopped')
@@ -236,6 +265,7 @@ def publish_pair(root, config, state, source, generated, fingerprint, options, a
     stage = Path(tempfile.mkdtemp(prefix='.sno2md-sync-', dir=config['vault']))
     journal_path = root/'journal.json'
     previous = entry.get('success')
+    image_assets = image_assets or {}
     try:
         for folder in ('new', 'old', 'held'):
             (stage/folder).mkdir()
@@ -263,13 +293,37 @@ def publish_pair(root, config, state, source, generated, fingerprint, options, a
                     os.fsync(stream.fileno())
                 if file_digest(stage/'old'/path.name) != old[ext]:
                     raise Conflict(f'output changed while copying: {path}')
+        # Immutable asset additions precede Markdown publication. Old assets are
+        # retained so rollback and user references never lose their image bytes.
+        asset_targets = image_paths(config, entry, image_assets)
+        folder = asset_folder(entry['name'], entry.get('document_folders', False))
+        for relative, target in asset_targets.items():
+            incoming = checked_asset_path(generated, relative, folder)
+            expected = image_assets[relative]
+            if file_digest(incoming) != expected:
+                raise Conflict(f'generated image missing or changed: {relative}')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            current = file_digest(target)
+            if current is not None and current != expected:
+                raise Conflict(f'image output occupied or changed: {target}')
+            if current is None:
+                staged = stage/'new'/relative
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(incoming, staged)
+                with staged.open('r+b') as stream: os.fsync(stream.fileno())
+                try:
+                    os.link(staged, target)
+                except FileExistsError:
+                    if file_digest(target) != expected: raise Conflict(f'image output occupied: {target}')
         from datetime import datetime, timezone
         success = {'revision': (previous or {}).get('revision', 0)+1,
                    'generator_version': GENERATOR_VERSION,
                    'input': fingerprint, 'options': options, 'outputs': hashes,
+                   'image_assets': dict(image_assets),
                    'at': datetime.now(timezone.utc).isoformat()}
         success['md_managed_hash'] = digest(split((stage/'new'/paths['md'].name).read_bytes())[0])
-        journal = {'source': source, 'name': entry['name'], 'folder': entry.get('folder', ''), 'stage': str(stage),
+        journal = {'source': source, 'name': entry['name'], 'folder': entry.get('folder', ''),
+                   'document_folders': entry.get('document_folders', False), 'stage': str(stage),
                    'old': old, 'success': success}
         save_json(journal_path, journal)
         for ext, path in paths.items():
@@ -283,6 +337,8 @@ def publish_pair(root, config, state, source, generated, fingerprint, options, a
             os.link(stage/'new'/path.name, path)
         if any(file_digest(paths[ext]) != digest for ext, digest in hashes.items()):
             raise Conflict('output changed during publication')
+        if any(file_digest(path) != image_assets[relative] for relative, path in asset_targets.items()):
+            raise Conflict('image changed during publication')
         for ext, path in paths.items():
             if old.get(ext) and file_digest(stage/'held'/path.name) != old[ext]:
                 raise Conflict(f'concurrent edit retained: {stage/"held"/path.name}')

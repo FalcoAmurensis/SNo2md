@@ -44,18 +44,29 @@ class ConversionJob:
     chunk_identity: str = None
     chunk_revision: str = None
     chunk_origin: str = None
+    image_storage: str = 'external'
+    document_folders: bool = True
+    review_root: str = None
+    review_images: bool = True
+    repeat_distance: int = 8
 
 
 def convert_job(job):
     from .api import export_note
     from .model import ConversionOptions
     from .chunk_cache import ChunkCache
+    from .image_review import ImageReview
     stages = {}
     started = time.perf_counter()
     from .sync_storage import store_lock
     with store_lock(Path(job.snapshot).parent):
         result = export_note(Path(job.snapshot), Path(job.output), name=job.name,
-                             options=ConversionOptions(width_scale=job.width_scale), timings=stages,
+                             options=ConversionOptions(width_scale=job.width_scale, image_storage=job.image_storage,
+                                                       document_folders=job.document_folders, review_images=job.review_images,
+                                                       repeat_distance=job.repeat_distance), timings=stages,
+                             image_review=ImageReview(job.review_root or Path(job.output).parent/'image-review',
+                                 job.chunk_identity or job.name, distance=job.repeat_distance, defer=True,
+                                 source=job.chunk_origin or job.snapshot),
                              chunk_cache=ChunkCache(job.chunk_root, identity=job.chunk_identity,
                                  source_revision=job.chunk_revision, origin=job.chunk_origin, defer=True))
     finished = time.perf_counter()
@@ -68,6 +79,8 @@ def convert_job(job):
     return {'output': str(result.pdf.parent), 'counts': result.counts,
             'warnings': result.warnings,
             'chunk_stage': str(result.chunk_index) if result.chunk_index else None,
+            'image_assets': result.image_assets,
+            'image_review_report': result.image_review_report,
             'pid': os.getpid(), 'started': started, 'finished': finished,
             'queue_seconds': started-job.submitted, 'seconds': finished-started,
             'peak_rss': rss, 'stages': stages}

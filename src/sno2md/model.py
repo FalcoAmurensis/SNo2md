@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Optional
 
 
-MARKDOWN_SCHEMA = 3
-GENERATOR_VERSION = 'md-8-page-template-appdata-chunks'
+MARKDOWN_SCHEMA = 4
+GENERATOR_VERSION = 'md-11-appdata-page-metadata'
 
 
 class DecodeError(ValueError):
@@ -28,10 +28,22 @@ class OutputError(OSError):
 @dataclass(frozen=True)
 class ConversionOptions:
     width_scale: float = 0.5
+    image_storage: str = 'external'
+    document_folders: bool = True
+    review_images: bool = True
+    repeat_distance: int = 8
 
     def __post_init__(self):
         if not math.isfinite(self.width_scale) or self.width_scale <= 0:
             raise ValueError('width_scale must be finite and positive')
+        if self.image_storage not in {'external', 'embedded'}:
+            raise ValueError('image_storage must be external or embedded')
+        if type(self.document_folders) is not bool:
+            raise ValueError('document_folders must be a boolean')
+        if type(self.review_images) is not bool:
+            raise ValueError('review_images must be a boolean')
+        if type(self.repeat_distance) is not int or not 0 <= self.repeat_distance <= 32:
+            raise ValueError('repeat_distance must be an integer from 0 to 32')
 
 
 @dataclass
@@ -51,3 +63,5 @@ class ConversionResult:
     markdown: Optional[Path] = None
     warnings: list = field(default_factory=list)
     chunk_index: Optional[Path] = None
+    image_assets: dict = field(default_factory=dict)
+    image_review_report: Optional[dict] = None

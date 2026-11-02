@@ -1,5 +1,4 @@
-"""Assemble original-PDF Markdown and visible stroke metadata in note page order."""
-import json
+"""Assemble original-PDF Markdown with stroke counts in note page order."""
 import re
 from urllib.parse import quote
 from .markdown_regions import create, page_user
@@ -26,6 +25,17 @@ def nested_headings(text):
     return '\n'.join(lines)
 
 
+def page_metadata(number, page, refs):
+    """Private page provenance, stored in the AppData note index, not Markdown."""
+    handwriting, images = page_handwriting(page)
+    sources = []
+    for _, _, info in refs:
+        source = {key: value for key, value in info.items() if key not in ('text', 'pdf_page_number')}
+        source.update(source_pdf_page=info['pdf_page_number'], extraction_scope='full_source_page')
+        sources.append(source)
+    return dict(note_page=number,source_refs=sources,handwriting=handwriting,inserted_image_count=images)
+
+
 def render_markdown(note, pdf_name, backgrounds, engine):
     if len(backgrounds) != len(note.pages):
         raise RenderError('Markdown note/background page count mismatch')
@@ -35,21 +45,11 @@ def render_markdown(note, pdf_name, backgrounds, engine):
     for number, (pg, refs) in enumerate(zip(note.pages, backgrounds), 1):
         link = f'{quote(pdf_name, safe="")}#page={number}'
         md.extend([f'## 페이지 {number}\n', f'[필기 포함 PDF 페이지 열기]({link})\n'])
-        handwriting, images = page_handwriting(pg)
-        sources = []
-        for _, _, info in refs:
-            source = {key: value for key, value in info.items() if key not in ('text', 'pdf_page_number')}
-            source.update(source_pdf_page=info['pdf_page_number'], extraction_scope='full_source_page')
-            sources.append(source)
-        metadata = {'note_page': number, 'source_refs': sources,
-                    'handwriting': handwriting, 'inserted_image_count': images}
-        # Escape comment delimiters in filenames; JSON decoding restores original values.
-        payload = json.dumps(metadata, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
-        payload = payload.replace('&', '\\u0026').replace('<', '\\u003c').replace('>', '\\u003e').replace('--', '\\u002d\\u002d')
-        md.append(f'<!-- sno2md:page-meta\n{payload}\n-->\n')
+        metadata = page_metadata(number, pg, refs)
+        md.append(f'필기: {metadata["handwriting"]["stroke_count"]}획\n')
         # A cropped/duplicated placement still requests the full source page.
         # Keep every placement in metadata, but show that page once per note page.
-        unique_sources = list({(s['asset'], s['source_pdf_page']): s for s in sources}.values())
+        unique_sources = list({(s['asset'], s['source_pdf_page']): s for s in metadata['source_refs']}.values())
         for index, source in enumerate(unique_sources, 1):
             text = engine.extract(source['asset'], source['source_pdf_page'] - 1)
             if any(line.startswith('<!-- sno2md:page-user:') for line in text.splitlines()):

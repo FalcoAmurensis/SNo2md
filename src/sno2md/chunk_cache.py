@@ -12,6 +12,7 @@ from .locations import state_directory
 from .markdown_regions import _layout,split,digest
 
 SCHEMA=1
+PAGE_METADATA_SCHEMA=1
 SETTINGS=dict(max_tokens=400,min_tokens=120,table_mode='preserve',respect_section_starts=True,
               header_footer_mode='exclude',use_ocr=False,force_ocr=False,embed_images=False,
               force_text=True,show_progress=False)
@@ -95,11 +96,15 @@ class ChunkCache:
             payload_sha256=digest(_encoded(payload)),payload=payload))
         return dict(asset=asset,source_sha256=source_hash,cache_file=relative,chunk_count=len(payload['chunks']),cache_hit=False)
 
-    def prepare(self,note,engine,source,vault):
+    def prepare(self,note,engine,source,vault,backgrounds=None):
         root=self.root.resolve()
         for p in [Path(source).resolve(),Path(vault).resolve()]:
             if root==p or root.is_relative_to(p) or p.is_relative_to(root):
                 raise ValueError('chunk cache must be separate from source and Vault')
+        from .export import page_metadata
+        from .pdf import prepare_backgrounds
+        if backgrounds is None:backgrounds=prepare_backgrounds(note)
+        if len(backgrounds)!=len(note.pages):raise ValueError('page metadata/background count mismatch')
         identity=self.identity or note_id(os.path.normcase(str(Path(source).resolve())))
         pages=[];assets=[]
         for i,p in enumerate(note.pages,1):
@@ -108,11 +113,12 @@ class ChunkCache:
                 asset=bg['asset'];refs.append(dict(asset=asset,source_page=bg['page_index']+1))
                 if asset not in assets:assets.append(asset)
             key=str(p.get('source_page_id') or p.get('id') or f'page-{i}')
-            pages.append(dict(note_page=i,page_key=digest(key.encode('utf-8')),source_refs=refs))
+            pages.append(dict(note_page=i,page_key=digest(key.encode('utf-8')),source_refs=refs,
+                              metadata=page_metadata(i,p,backgrounds[i-1])))
         revision=self.source_revision or digest(_encoded([[k,digest(v)] for k,v in sorted(note.files.items())]))
         return dict(schema=SCHEMA,kind='note_chunk_index',note_id=identity,source_revision=revision,
             engine_key=self.engine_key,title=note.title,origin=str(self.origin or Path(source).resolve()),
-            pages=pages,documents=[self._source(note,a,engine) for a in assets])
+            page_metadata_schema=PAGE_METADATA_SCHEMA,pages=pages,documents=[self._source(note,a,engine) for a in assets])
 
     def commit(self,manifest,markdown,pdf,expected_managed=None):
         markdown,pdf=Path(markdown),Path(pdf)
@@ -149,6 +155,7 @@ class ChunkCache:
         try:index=_read(self.index_path(identity))
         except (OSError,ValueError):return False
         if index.get('schema')!=SCHEMA or index.get('engine_key')!=self.engine_key or index.get('source_revision')!=source_revision:return False
+        if index.get('page_metadata_schema')!=PAGE_METADATA_SCHEMA or any('metadata' not in p for p in index.get('pages',[])):return False
         for document in index['documents']:
             path=(self.root/document['cache_file']).resolve()
             if not path.is_relative_to((self.root/'documents').resolve()) or not path.is_file():return False
