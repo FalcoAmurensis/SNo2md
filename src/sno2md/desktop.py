@@ -63,6 +63,8 @@ class DesktopController:
         self.thread.start()
 
     def initialize(self):
+        from .app_reset import finish_reset
+        with store_lock(self.root):finish_reset(self.root)
         if (self.root/'config.json').exists():
             self.events.put(('config', load_config(self.root)))
             config, state = load_config(self.root), load_state(self.root)
@@ -78,6 +80,8 @@ class DesktopController:
 
     def save_settings(self, backup, vault, width_scale, start_on_login, native, workers='auto', folder_rules=None):
         with store_lock(self.root):
+            from .app_reset import finish_reset
+            finish_reset(self.root)
             existing = (self.root/'config.json').exists()
             if existing:
                 config = load_config(self.root)
@@ -109,6 +113,20 @@ class DesktopController:
         self.events.put(('config', config))
         Synchronizer(self.root, config, state, on_state=self.state).inspect()
         self.log('설정을 저장했습니다.')
+
+    def reset_settings(self, native):
+        """Run from an idle controller worker, never alongside synchronization."""
+        from .app_reset import disconnect
+        with store_lock(self.root):
+            previous=native.get_startup_command()
+            native.set_startup_command(None)
+            try:disconnect(self.root)
+            except Exception:
+                # Once committed, an interrupted reset is resumed on startup.
+                if not (self.root/'reset-pending.json').exists():native.set_startup_command(previous)
+                raise
+        self.events.put(('reset',None))
+        self.log('동기화 연결과 파일 관리 이력·청크를 초기화했습니다. 새 동기화에서 출력을 다시 생성합니다.')
 
     def save_and_sync(self, *values):
         self.save_settings(*values)

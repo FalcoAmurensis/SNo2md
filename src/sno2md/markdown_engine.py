@@ -60,13 +60,17 @@ def load_engine():
 
 
 class SourceMarkdown:
-    def __init__(self, note):
+    def __init__(self, note, object_policy='image'):
+        if object_policy not in {'image','native'}:
+            raise ValueError('unknown source-object display policy')
         try:
             pymupdf, pymupdf4llm = load_engine()
         except ImportError as error:
             raise RenderError("Markdown engine dependencies are missing; reinstall the project's declared dependencies") from error
         self.note, self.pdf, self.engine = note, pymupdf, pymupdf4llm
         self.documents, self.pages = {}, {}
+        self.object_policy = object_policy
+        self.object_renderers, self.object_reports = {}, {}
 
     def __enter__(self):
         return self
@@ -76,6 +80,8 @@ class SourceMarkdown:
             document.close()
         self.documents.clear()
         self.pages.clear()
+        self.object_renderers.clear()
+        self.object_reports.clear()
 
     def extract(self, asset, page_index):
         key = (asset, page_index)
@@ -97,6 +103,11 @@ class SourceMarkdown:
                     chunks[0].get('metadata', {}).get('page_number') != page_index + 1):
                 raise ValueError('unexpected Markdown page result')
             text = chunks[0]['text']
+            if self.object_policy == 'image':
+                from .object_rendering import ObjectRenderer, render_page_objects
+                renderer = self.object_renderers.setdefault(asset, ObjectRenderer(document))
+                text, report = render_page_objects(chunks[0], renderer)
+                self.object_reports[key] = report
             if not text.strip() and document[page_index].get_images():
                 # Layout can return no boxes for a scan. Preserve its visual
                 # content without OCR or silently returning an empty success.

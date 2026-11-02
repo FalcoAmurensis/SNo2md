@@ -47,12 +47,15 @@ def render_markdown(note, pdf_name, backgrounds, engine):
         payload = json.dumps(metadata, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
         payload = payload.replace('&', '\\u0026').replace('<', '\\u003c').replace('>', '\\u003e').replace('--', '\\u002d\\u002d')
         md.append(f'<!-- sno2md:page-meta\n{payload}\n-->\n')
-        for index, source in enumerate(sources, 1):
+        # A cropped/duplicated placement still requests the full source page.
+        # Keep every placement in metadata, but show that page once per note page.
+        unique_sources = list({(s['asset'], s['source_pdf_page']): s for s in sources}.values())
+        for index, source in enumerate(unique_sources, 1):
             text = engine.extract(source['asset'], source['source_pdf_page'] - 1)
             if any(line.startswith('<!-- sno2md:page-user:') for line in text.splitlines()):
                 raise RenderError('reserved Markdown page user marker in source text')
             if text.strip():
-                title = '원본 PDF 내용' if len(sources) == 1 else f'원본 PDF {index} · {source["source_pdf_page"]}페이지'
+                title = '원본 PDF 내용' if len(unique_sources) == 1 else f'원본 PDF {index} · {source["source_pdf_page"]}페이지'
                 md.extend([f'### {title}\n', nested_headings(text).strip() + '\n'])
         identity = pg.get('source_page_id') or pg.get('id') or f'page-{number}'
         md.append(page_user(str(identity)).decode('utf-8'))

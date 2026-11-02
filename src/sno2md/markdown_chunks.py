@@ -59,7 +59,30 @@ def crop_image(document, page, bbox):
     return document[page - 1].get_pixmap(clip=clip, dpi=150, alpha=False).tobytes('png')
 
 
-def render_chunked_markdown(chunked, document, title, source_link):
+def render_chunked_markdown(chunked, document, title, source_link, object_policy='image'):
+    """Use one image per visual source object; retain native mode for comparisons."""
+    if object_policy == 'native':
+        return _render_native_chunks(chunked, document, title, source_link)
+    if object_policy != 'image':
+        raise ValueError('unknown source-object display policy')
+    from .object_rendering import ObjectRenderer, render_chunk_objects
+    renderer=ObjectRenderer(document,source_link)
+    elements={}
+    for e in chunked.elements:
+        data=e if isinstance(e,dict) else {k:getattr(e,k) for k in ('id','page','bbox','boxclass','text')}
+        elements[data['id']]=data
+    rows=[f'# {title} · 청킹\n'];reports=[]
+    for number,chunk in enumerate(chunked,1):
+        meta=chunk.metadata
+        body,report=render_chunk_objects(
+            {'text':chunk.text,'metadata':{'element_ids':meta.element_ids}},elements,renderer)
+        rows += [f'## 청크 {number}\n',body]
+        reports.extend(dict(r,chunk_id=chunk.id,object_id=r['key'],
+                            reason=r.get('reason','source object displayed once')) for r in report)
+    return '\n\n'.join(rows),reports
+
+
+def _render_native_chunks(chunked, document, title, source_link):
     """Return readable chunks and a log of supplements, without changing native text."""
     params = getattr(chunked, 'params', SETTINGS['default'])
     rows = [f'# {title} · 청킹\n',

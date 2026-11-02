@@ -38,6 +38,7 @@ def validate_config(root, config):
 
 
 def load_config(root):
+    if (Path(root)/'reset-pending.json').exists():raise Conflict('app reset pending; restart the desktop app to complete it')
     path = Path(root)/'config.json'
     if not path.is_file():
         raise ValueError('configure backup and Vault first')
@@ -45,6 +46,7 @@ def load_config(root):
 
 
 def load_state(root):
+    if (Path(root)/'reset-pending.json').exists():raise Conflict('app reset pending; restart the desktop app to complete it')
     path = Path(root)/'state.json'
     if not path.exists() and (Path(root)/'journal.json').exists():
         raise Conflict('recovery journal exists but state.json is missing')
@@ -73,7 +75,10 @@ def change_paths(root, config, backup, vault):
     if pair_key(dict(config, backup=backup, vault=vault)) == pair_key(config):
         return dict(config)
     checked = new_config(root, backup, vault, width_scale=config['width_scale'])
-    return dict(config, **{key: checked[key] for key in ('backup', 'vault', 'backup_kind')})
+    result = dict(config, **{key: checked[key] for key in ('backup', 'vault', 'backup_kind')})
+    result.pop('reset_id', None)
+    result.pop('recreate_outputs', None)
+    return result
 
 
 def new_config(root, backup, vault, *, width_scale=0.5, mode='auto', poll=5.0,
@@ -95,10 +100,13 @@ def new_config(root, backup, vault, *, width_scale=0.5, mode='auto', poll=5.0,
 def create_config(root, config):
     """Caller holds store_lock. Keep interrupted initialization recoverable."""
     root = Path(root)
-    if any((root/name).exists() for name in ('config.json', 'state.json', 'journal.json')):
+    if any((root/name).exists() for name in ('config.json', 'state.json', 'journal.json','reset-pending.json')):
         raise Conflict('already configured; existing state is retained')
     validate_config(root, config)
+    fresh = root/'reset-ready.json'
+    if fresh.exists():config['recreate_outputs'] = True
     save_json(root/'config.json', config)
+    fresh.unlink(missing_ok=True)
     # load_state supplies an empty state until the first synchronization saves it.
 
 

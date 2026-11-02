@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sno2md"
-version = "0.6.1"
+version = "0.6.2"
 description = "Decode Samsung Notes SDOCX and export PDF and Markdown"
 requires-python = ">=3.11"
 license = "AGPL-3.0-only"

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import time
 from .model import GENERATOR_VERSION
 from .markdown_regions import split, digest, merge
 
@@ -32,7 +33,13 @@ def save_json(path, value):
             stream.write('\n')
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        for attempt in range(5):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 4:raise
+                time.sleep(.03 * (attempt + 1))
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)

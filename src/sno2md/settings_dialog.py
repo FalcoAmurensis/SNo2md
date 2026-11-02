@@ -112,6 +112,11 @@ class SettingsDialog:
         ttk.Label(self.advanced, text='동시 처리할 노트 수', style='Card.TLabel').grid(row=2, column=0, sticky='w', pady=(sp('m'), 0))
         self.workers_box = ttk.Combobox(self.advanced, textvariable=self.workers, values=('자동 (권장)', *range(1, 9)), width=12, state='readonly')
         self.workers_box.grid(row=2, column=1, sticky='e', pady=(sp('m'), 0))
+        ttk.Label(self.advanced, text='동기화 연결 해제', style='Card.TLabel').grid(row=3,column=0,sticky='w',pady=(sp('m'),0))
+        self.reset_button=ttk.Button(self.advanced,text='앱 초기화…',command=self.reset)
+        self.reset_button.grid(row=3,column=1,padx=(sp('s'),0),pady=(sp('m'),0))
+        wrapped(self.advanced, text='설정·파일 이력·청크를 비우고 새 동기화에서 출력을 덮어씁니다. 사용자 메모는 보존합니다.').grid(row=4,column=0,columnspan=2,sticky='ew')
+        if not app.config:self.reset_button.configure(state='disabled')
         self.notice = ttk.Frame(center, padding=(sp('l'), sp('s')))
         self.notice.columnconfigure(0, weight=1)
         wrapped(self.notice, variable=self.message, style='TLabel').grid(row=0, column=0, sticky='ew')
@@ -246,6 +251,18 @@ class SettingsDialog:
                        self.select_folders_button, self.width_box, self.startup_box, self.advanced_button, self.save_button, self.cancel_button):
             widget.configure(state='normal' if enabled else 'disabled')
         self.workers_box.configure(state='readonly' if enabled else 'disabled')
+        self.reset_button.configure(state='normal' if enabled and self.app.config else 'disabled')
+
+    def reset(self):
+        if self.saving or self.app.controller.busy or self.app.closing or not self.app.config:return
+        from tkinter import messagebox
+        if not messagebox.askyesno('앱 초기화',
+            '현재 동기화 연결·설정·모든 파일 관리 이력·청크를 삭제하고 로그인 자동 시작을 끕니다.\n\n'
+            '삼성노트 원본과 Vault 파일은 지금 삭제하지 않습니다. 새 동기화의 첫 대상 목록에 대응하는 PDF·Markdown은 기존 파일이 있어도 덮어씁니다.\n'
+            '사용자 메모는 보존합니다. 메모 경계를 읽을 수 없는 Markdown은 전체 보존본을 남기고 다시 생성합니다.\n\n초기화할까요?',parent=self.window):return
+        self.saving=True;self.set_enabled(False)
+        self.app.controller.launch(lambda:self.app.controller.reset_settings(self.app.native),kind='reset')
+        self.message.set('동기화 연결을 해제하는 중…');self.app.controls()
 
     def close(self, force=False):
         if not force:

@@ -40,17 +40,24 @@ class ConversionJob:
     name: str
     width_scale: float
     submitted: float
+    chunk_root: str = None
+    chunk_identity: str = None
+    chunk_revision: str = None
+    chunk_origin: str = None
 
 
 def convert_job(job):
     from .api import export_note
     from .model import ConversionOptions
+    from .chunk_cache import ChunkCache
     stages = {}
     started = time.perf_counter()
     from .sync_storage import store_lock
     with store_lock(Path(job.snapshot).parent):
         result = export_note(Path(job.snapshot), Path(job.output), name=job.name,
-                             options=ConversionOptions(width_scale=job.width_scale), timings=stages)
+                             options=ConversionOptions(width_scale=job.width_scale), timings=stages,
+                             chunk_cache=ChunkCache(job.chunk_root, identity=job.chunk_identity,
+                                 source_revision=job.chunk_revision, origin=job.chunk_origin, defer=True))
     finished = time.perf_counter()
     try:
         import psutil
@@ -59,6 +66,8 @@ def convert_job(job):
     except ImportError:
         rss = None
     return {'output': str(result.pdf.parent), 'counts': result.counts,
+            'warnings': result.warnings,
+            'chunk_stage': str(result.chunk_index) if result.chunk_index else None,
             'pid': os.getpid(), 'started': started, 'finished': finished,
             'queue_seconds': started-job.submitted, 'seconds': finished-started,
             'peak_rss': rss, 'stages': stages}

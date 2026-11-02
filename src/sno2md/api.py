@@ -45,7 +45,7 @@ def convert_pdf(source, destination, *, options=None):
         raise OutputError(f'PDF output failed: {error}') from error
 
 
-def export_note(source, vault_root, *, name=None, options=None, timings=None):
+def export_note(source, vault_root, *, name=None, options=None, timings=None, chunk_cache=None):
     """Decode once in memory and write PDF/MD without an external asset store.
 
     Existing outputs are never replaced here. The sync layer manages replacement/recovery.
@@ -68,6 +68,9 @@ def export_note(source, vault_root, *, name=None, options=None, timings=None):
     note = measured("decode", read_note, source)
     backgrounds = measured("backgrounds", prepare_backgrounds, note)
     published = []
+    chunk_manifest = None
+    chunk_warnings = []
+    cache = None
     try:
         vault.mkdir(parents=True,exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='.sno2md-', dir=vault) as output_tmp:
@@ -76,13 +79,36 @@ def export_note(source, vault_root, *, name=None, options=None, timings=None):
             started = time.perf_counter()
             with SourceMarkdown(note) as engine:
                 markdown = render_markdown(note, pdf_path.name, backgrounds, engine)
+                deferred = [dict(record, asset=asset, source_page=page+1)
+                            for (asset, page), records in engine.object_reports.items()
+                            for record in records if record['action'] == 'unresolved']
+                try:
+                    from .chunk_cache import ChunkCache
+                    cache = chunk_cache if chunk_cache is not None else ChunkCache()
+                    chunk_manifest = measured('chunks', cache.prepare, note, engine, source, vault)
+                except Exception as error:
+                    chunk_warnings.append(f'Chunk cache unavailable; PDF/Markdown retained: {error}')
             timings['markdown'] = time.perf_counter()-started
             (output_stage/'output.md').write_text(markdown, encoding='utf-8')
             for staged, target in ((output_stage/'output.pdf',pdf_path),(output_stage/'output.md',md_path)):
                 publish_file(staged,target)
                 published.append((target,target.stat()))
-        return ConversionResult(pdf=pdf_path, markdown=md_path, counts=counts,
-                                warnings=['Markdown uses original PDF pages without OCR; reading order, tables, and formulas may need review.'])
+        warnings = ['Markdown uses original PDF pages without OCR; reading order, tables, and formulas may need review.']
+        warnings.extend(f"Markdown object retained: {r['asset']} page {r['source_page']} "
+                        f"{r['key']}: {r['reason']}" for r in deferred)
+        chunk_index = None
+        if chunk_manifest is not None:
+            try:
+                if cache.defer:
+                    from .chunk_cache import atomic_json
+                    chunk_index = vault/'chunk-manifest.json'
+                    atomic_json(chunk_index, chunk_manifest)
+                else:
+                    chunk_index = cache.commit(chunk_manifest, md_path, pdf_path)
+            except Exception as error:
+                chunk_warnings.append(f'Chunk index unavailable; PDF/Markdown retained: {error}')
+        warnings.extend(chunk_warnings)
+        return ConversionResult(pdf=pdf_path, markdown=md_path, counts=counts, warnings=warnings, chunk_index=chunk_index)
     except Exception as error:
         failures = []
         for path, stamp in reversed(published):

@@ -18,6 +18,7 @@ from .catalog import read_catalog, note_title
 from .folder_selection import inventory, selection_for, enabled
 from .locations import require_separate
 from .model import GENERATOR_VERSION
+from .chunk_cache import ChunkCache, note_id
 from .sync_storage import MissingOutput, Conflict, check_outputs, file_digest, publish_pair, recover, save_json, store_lock, output_paths
 
 
@@ -370,8 +371,11 @@ class Synchronizer:
                             self.status(key, 'pending', 'stopped before submission')
                             shutil.rmtree(work)
                             break
+                        from .sync_config import pair_key
+                        identity = note_id(pair_key(self.config)+'\0'+key)
                         job = ConversionJob(str(snapshot), str(work/'output'), self.state['notes'][key]['name'],
-                                            self.config['width_scale'], time.perf_counter())
+                                            self.config['width_scale'], time.perf_counter(),
+                                            str(self.root/'chunks'),identity,value,str(source.resolve()))
                         future = pool.submit(convert_job, job)
                         pending[future] = (key, source, value, work)
                         self.status(key, 'converting')
@@ -397,6 +401,20 @@ class Synchronizer:
                         self.measured('publish', publish_pair, self.root, self.config, self.state,
                                       key, Path(result['output']), value, self.options,
                                       self.restore_missing.get(key, False), self.resolutions.get(key))
+                        if result.get('chunk_stage'):
+                            try:
+                                from .sync_config import pair_key
+                                stage = Path(result['chunk_stage']).resolve()
+                                if not stage.is_relative_to(work.resolve()):raise ValueError('chunk stage outside owned job')
+                                cache = ChunkCache(self.root/'chunks', identity=note_id(pair_key(self.config)+'\0'+key))
+                                paths = output_paths(self.config,self.state['notes'][key])
+                                index = cache.commit(json.loads(stage.read_text(encoding='utf-8')),paths['md'],paths['pdf'],
+                                    self.state['notes'][key]['success']['md_managed_hash'])
+                                self.state['notes'][key]['success']['chunk_cache'] = True
+                                save_json(self.root/'state.json',self.state)
+                                self.emit('chunks: '+json.dumps(dict(source=key,index=str(index))))
+                            except Exception as error:
+                                self.emit(f'warning: chunk index not updated for {key}: {error}')
                         if key in self.resolutions:
                             self.resolution_done.add(key)
                         self.resolutions.pop(key, None)
@@ -446,8 +464,15 @@ class Synchronizer:
             for key, path in found.items():
                 if key in selected and key not in state['notes']:
                     state['notes'][key] = registration(path, catalog, state)
+                    from .app_reset import adopt_output
+                    adopt_output(self.root,config,state['notes'][key])
                     save_json(self.root/'state.json', state)
                     self.emit(f'registered: {key} -> {state["notes"][key]["name"]}')
+            # The overwrite authorization applies to the first fresh inventory.
+            # Later registrations and normal synchronization use normal protection.
+            if config.get('recreate_outputs'):
+                config.pop('recreate_outputs')
+                save_json(self.root/'config.json',config)
         self.inspect(found, folders)
         candidates = []
         for key, entry in list(state['notes'].items()):
@@ -496,6 +521,10 @@ class Synchronizer:
                 request = self.resolutions.get(key)
                 allowed = request['missing'] if request else key in self.restore_targets
                 missing = self.measured('check_outputs', check_outputs, config, entry, allowed, request)
+                if entry.get('reset_preserve_markdown'):
+                    self.preserve_copy(key,dict(hash=entry['success']['outputs']['md']))
+                    entry.pop('reset_preserve_markdown')
+                    save_json(self.root/'state.json',state)
                 if request:
                     if missing != request['missing']:
                         raise Conflict('missing output paths changed since confirmation')
@@ -509,8 +538,18 @@ class Synchronizer:
                 if (not missing and key not in self.refresh and success.get('input') == value and
                         success.get('options') == self.options and
                         success.get('generator_version') == GENERATOR_VERSION):
-                    self.status(key, 'synced')
-                    continue
+                    from .sync_config import pair_key
+                    cache = ChunkCache(self.root/'chunks',identity=note_id(pair_key(config)+'\0'+key))
+                    ready = True
+                    if success.get('chunk_cache') or cache.index_path().is_file():
+                        try:
+                            paths = output_paths(config,entry)
+                            ready = cache.refresh_memos(cache.identity,paths['md'],paths['pdf'],value,success['md_managed_hash'])
+                        except Exception as error:
+                            self.emit(f'warning: memo chunk index not updated for {key}: {error}')
+                    if ready:
+                        self.status(key, 'synced')
+                        continue
                 if now < self.retry_after.get(key, 0):
                     continue
                 candidates.append((key, source, value))

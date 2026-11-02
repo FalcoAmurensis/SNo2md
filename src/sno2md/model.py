@@ -6,7 +6,7 @@ from typing import Optional
 
 
 MARKDOWN_SCHEMA = 3
-GENERATOR_VERSION = 'md-5-page-notes-count-only-pymupdf-2.0-embedded'
+GENERATOR_VERSION = 'md-8-page-template-appdata-chunks'
 
 
 class DecodeError(ValueError):
@@ -50,3 +50,4 @@ class ConversionResult:
     counts: dict
     markdown: Optional[Path] = None
     warnings: list = field(default_factory=list)
+    chunk_index: Optional[Path] = None

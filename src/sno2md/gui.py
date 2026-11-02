@@ -584,7 +584,11 @@ class Application:
         self.layout_actions()
 
     def update_config_summary(self):
-        if not self.config: return
+        if not self.config:
+            self.backup_summary.set('삼성노트 백업: 설정 필요')
+            self.vault_summary.set('저장 폴더/Vault: 설정 필요')
+            self.folder_summary.set('가져올 폴더: 설정 필요')
+            return
         from .folder_selection import summary, selection_for
         self.backup_summary.set('삼성노트 백업: ' + self.config['backup'])
         self.vault_summary.set('저장 폴더/Vault: ' + self.config['vault'])
@@ -960,6 +964,13 @@ class Application:
                     if self.config is None or pair_key(self.config) != pair_key(value): self.checked.clear()
                     self.config = value; self.update_config_summary()
                     if self.settings_dialog and self.settings_dialog.saving: self.settings_dialog.close(force=True)
+                elif kind == 'reset':
+                    self.config=None;self.checked.clear();self.pending_offer=None;self.pending_results=[]
+                    self.run_keys.clear();self.last_sync=self.latest_success=None
+                    if self.settings_dialog:self.settings_dialog.close(force=True)
+                    self.update_config_summary();self.update_state({'notes':{}})
+                    self.banner.set('초기화했습니다. 새 동기화를 설정하세요.')
+                    if not self.closing:self.window.after(100,self.edit_settings)
                 elif kind == 'locations': self.locations = value
                 elif kind == 'state': self.update_state(value)
                 elif kind == 'resolution_offer':
