@@ -37,7 +37,7 @@ Vault/
 | 항목 | 지원 범위 |
 | --- | --- |
 | Windows 앱 | Windows 11 x64 |
-| Python 모듈 | Python 3.10 이상 |
+| Python 모듈 | Python 3.11 이상 (PMP2 실험) |
 | 입력 파일 | `.sdocx` 파일 |
 | 입력 폴더 | SDOCX를 압축 해제한 것과 같은 내부 구조의 노트 폴더, 또는 이런 노트들을 모아 둔 백업 폴더 |
 | 저장 위치 | Obsidian Vault 또는 지정한 출력 폴더. |
@@ -331,7 +331,9 @@ SDOCX는 페이지 정보와 원본 PDF·이미지 등을 ZIP 형태로 묶은 �
 
 
 
-PDF 합성에는 pypdf, Markdown 추출에는 PyMuPDF4LLM·PyMuPDF·PyMuPDF Layout 1.28.2를 사용합니다. Windows 앱은 Tkinter/ttk, sv-ttk 2.6.1(MIT), pywin32로 구성됩니다.
+PDF 합성에는 pypdf, Markdown 추출에는 PyMuPDF 2.0 통합 엔진을 사용합니다(PMP2 실험 브랜치). 그림과 독립 수식은 Markdown에 이미지를 내장하며, 외부 OCR이나 수식 인식 모델은 사용하지 않습니다. Windows 앱은 Tkinter/ttk, sv-ttk 2.6.1(MIT), pywin32로 구성됩니다.
+
+PMP2의 논문 변환·청킹 비교 결과는 로컬 `docs/PyMuPDF2/results/README.md`에서 확인할 수 있습니다. 실험 코드는 `research/pmp2/`에 있습니다. `sno2md.markdown_chunks.extract_chunks(document, setting='default')`는 전체 PDF의 구조 기반 청킹을 제공합니다. `small`, `large`, `isolated_tables` 설정도 지원하며, 앱은 기존의 페이지별 Markdown 출력을 유지합니다. 수식의 LaTeX 변환과 표 셀의 의미 정확도는 보장하지 않으며 실험 결과와 원본을 함께 검토해야 합니다.
 
 ## 라이선스와 소스 배포
 

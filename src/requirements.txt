@@ -1,6 +1,6 @@
 # CLI/conversion runtime only; keep in sync with pyproject.toml base dependencies.
 # Windows GUI: install -e ".\src[desktop]" from the project root instead.
 pypdf==6.20.1
-pymupdf4llm==1.28.2
-pymupdf==1.28.2
-pymupdf-layout==1.28.2
+pymupdf4llm==2.0
+pymupdf==2.0
+pymupdf-layout==2.0

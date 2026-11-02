@@ -6,7 +6,7 @@ from typing import Optional
 
 
 MARKDOWN_SCHEMA = 3
-GENERATOR_VERSION = 'md-4-page-notes-count-only-pymupdf4llm-1.28.2'
+GENERATOR_VERSION = 'md-5-page-notes-count-only-pymupdf-2.0-embedded'
 
 
 class DecodeError(ValueError):

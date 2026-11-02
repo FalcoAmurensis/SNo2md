@@ -1,4 +1,6 @@
 """Extract original PDF pages in memory; caches live for one note export only."""
+import base64
+import sys
 from threading import Lock, get_ident
 
 from .model import RenderError
@@ -11,19 +13,19 @@ _configured_layout = None
 def load_engine():
     """Initialize the pinned Layout engine with non-spinning ONNX sessions.
 
-    Layout 1.28.2 creates its sessions during import and exposes no session
+    Layout 2.0 creates its sessions during import and exposes no session
     options. Scope the constructor hook to this thread and initialization only;
     never leave ONNX patched for other models in an embedding application.
     """
     global _configured_layout
     with _initialization_lock:
         import onnxruntime
-        import pymupdf
-
-        if _configured_layout is not None and pymupdf._get_layout is _configured_layout:
+        loaded = sys.modules.get('pymupdf')
+        if (_configured_layout is not None and loaded is not None and
+                loaded._get_layout is _configured_layout):
             import pymupdf4llm
             pymupdf4llm.use_layout(True)
-            return pymupdf, pymupdf4llm
+            return loaded, pymupdf4llm
 
         original = onnxruntime.InferenceSession.__init__
         owner = get_ident()
@@ -35,17 +37,22 @@ def load_engine():
                 sess_options.add_session_config_entry('session.inter_op.allow_spinning', '0')
             original(session, path_or_bytes, sess_options, *args, **kwargs)
 
-        previous_layout = pymupdf._get_layout
+        previous_layout = loaded._get_layout if loaded is not None else None
+        pymupdf = loaded
         onnxruntime.InferenceSession.__init__ = initialize
         try:
-            # Also replace a Layout model imported earlier by an API caller.
-            # Existing sessions cannot be reconfigured after construction.
-            pymupdf._get_layout = None
+            # 2.0 initializes Layout on import of pymupdf itself, so the hook
+            # must already be installed before that first import.
+            import pymupdf
+            if loaded is not None:
+                # Existing sessions cannot be reconfigured after construction.
+                pymupdf._get_layout = None
             import pymupdf4llm
             pymupdf4llm.use_layout(True)
             _configured_layout = pymupdf._get_layout
         except Exception:
-            pymupdf._get_layout = previous_layout
+            if pymupdf is not None:
+                pymupdf._get_layout = previous_layout
             raise
         finally:
             onnxruntime.InferenceSession.__init__ = original
@@ -82,14 +89,21 @@ class SourceMarkdown:
                 raise ValueError('source PDF page index out of bounds')
             chunks = self.engine.to_markdown(
                 document, pages=[page_index], page_chunks=True, use_ocr=False,
-                force_ocr=False, write_images=False, embed_images=False,
+                force_ocr=False, write_images=False, embed_images=True,
                 force_text=True, show_progress=False, header=True, footer=True,
             )
             if (not isinstance(chunks, list) or len(chunks) != 1 or
                     not isinstance(chunks[0].get('text'), str) or
                     chunks[0].get('metadata', {}).get('page_number') != page_index + 1):
                 raise ValueError('unexpected Markdown page result')
-            self.pages[key] = chunks[0]['text']
+            text = chunks[0]['text']
+            if not text.strip() and document[page_index].get_images():
+                # Layout can return no boxes for a scan. Preserve its visual
+                # content without OCR or silently returning an empty success.
+                image = document[page_index].get_pixmap(dpi=150, alpha=False).tobytes('png')
+                text = ('![Source page image](data:image/png;base64,' +
+                        base64.b64encode(image).decode('ascii') + ')\n')
+            self.pages[key] = text
             return self.pages[key]
         except Exception as error:
             raise RenderError(f'Markdown extraction failed for {asset}, page {page_index + 1}: {error}') from error

@@ -29,7 +29,7 @@ def nested_headings(text):
 def render_markdown(note, pdf_name, backgrounds, engine):
     if len(backgrounds) != len(note.pages):
         raise RenderError('Markdown note/background page count mismatch')
-    md = [f'---\nsno2md_schema: {MARKDOWN_SCHEMA}\nmarkdown_engine: pymupdf4llm\n'
+    md = [f'---\nsno2md_schema: {MARKDOWN_SCHEMA}\nmarkdown_engine: pymupdf-2.0\n'
           f'generator_version: {GENERATOR_VERSION}\n---\n',
           f'# {note.title.replace(chr(10), " ").replace(chr(13), " ") or "Samsung Notes"}\n']
     for number, (pg, refs) in enumerate(zip(note.pages, backgrounds), 1):
