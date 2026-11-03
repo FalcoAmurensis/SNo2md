@@ -172,10 +172,11 @@ def rebind_entry(config, state, old, new):
 
 
 class Synchronizer:
-    def __init__(self, root, config, state, emit=print, on_state=None):
+    def __init__(self, root, config, state, emit=print, on_state=None, on_review=None):
         self.root, self.config, self.state = Path(root), config, state
         self.emit = emit
         self.on_state = on_state
+        self.on_review = on_review
         self.observed = {}
         self.refresh = set()
         self.restore_targets = set()
@@ -431,6 +432,7 @@ class Synchronizer:
                                 from .image_review import ImageReviewStore
                                 paths=output_paths(self.config,self.state['notes'][key])
                                 ImageReviewStore(self.root/'image-review').commit(review_report,paths['md'],paths['pdf'])
+                                if self.on_review is not None:self.on_review(review_report)
                             except Exception as error:
                                 self.emit(f'warning: image review index not updated: {error}')
                         if result.get('chunk_stage'):

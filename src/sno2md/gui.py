@@ -33,6 +33,10 @@ class Application:
         self.selecting = False
         self.group = 'active'
         self.settings_dialog = self.resolution_view = None
+        self.review_dialog = None
+        self.pending_reviews = {}
+        self.offered_reviews = set()
+        self.resume_review_watch = False
         self.pending_offer = None
         self.pending_results = []
         self.locations = {'backup': [], 'vault': []}
@@ -214,6 +218,7 @@ class Application:
         self.state_filter.set('전체' if self.state_filter.get() == name else name)
 
     def edit_settings(self):
+        if self.review_dialog:return
         if self.controller.busy or self.closing or self.resolution_view: return
         if self.settings_dialog:
             self.settings_dialog.window.lift(); return
@@ -539,8 +544,8 @@ class Application:
     def controls(self):
         busy = self.controller.busy
         mode = execution(busy, self.controller.kind, self.controller.stop_event.is_set())
-        idle = self.initialized and not busy and not self.closing and not self.settings_dialog and not self.resolution_view
-        self.settings_button.configure(state='normal' if self.initialized and not busy and not self.closing and not self.resolution_view else 'disabled')
+        idle = self.initialized and not busy and not self.closing and not self.settings_dialog and not self.resolution_view and not self.review_dialog
+        self.settings_button.configure(state='normal' if self.initialized and not busy and not self.closing and not self.resolution_view and not self.review_dialog else 'disabled')
         self.once_button.configure(state='normal' if idle and self.config else 'disabled')
         self.open_button.configure(state='normal' if self.config and not self.closing else 'disabled')
         self.watch_button.configure(text='중지 중…' if mode == 'stopping' else '자동 동기화 중지' if mode == 'watch' else '자동 동기화 시작',
@@ -599,8 +604,39 @@ class Application:
         self.failed = False; self.controller.start(only_sources=sources)
         self.banner.set('동기화를 준비하고 있습니다.'); self.controls()
 
+    def queue_image_review(self, value):
+        document, groups = value
+        pending = {g for g in groups if (document,g) not in self.offered_reviews}
+        if not pending:return
+        self.pending_reviews.setdefault(document,set()).update(pending)
+        if self.controller.busy and self.controller.kind == 'watch' and not self.controller.stop_event.is_set():
+            self.resume_review_watch=True
+            self.controller.stop()
+
+    def open_image_review(self):
+        if self.settings_dialog or self.resolution_view or self.review_dialog:return
+        from .image_review_dialog import ImageReviewDialog
+        documents=self.pending_reviews;self.pending_reviews={}
+        self.offered_reviews.update((d,g) for d,groups in documents.items() for g in groups)
+        resume=self.resume_review_watch;self.resume_review_watch=False
+        def finish(changed=False):
+            if self.closing:return
+            if changed or resume:
+                self.failed=False;self.controller.start(watch=resume)
+                self.banner.set('이미지 검토 결과를 반영하고 있습니다.' if changed else '자동 동기화를 다시 시작합니다.')
+            self.controls()
+        self.show()
+        try:
+            self.review_dialog=ImageReviewDialog(self,self.controller.root/'image-review',
+                self.config.get('repeat_distance',8),app=self,documents=documents,
+                on_apply=lambda:finish(True),on_close=finish)
+        except Exception as error:
+            self.log_lines.append(f'이미지 검토 창을 열지 못했습니다: {error}')
+            self.banner.set('이미지 검토 창을 열지 못했습니다. 설정에서 반복 이미지 그룹 검토를 열어 주세요.')
+            if resume:self.controller.start(watch=True)
+
     def toggle(self):
-        if self.closing or self.settings_dialog or self.resolution_view: return
+        if self.closing or self.settings_dialog or self.resolution_view or self.review_dialog: return
         if self.controller.busy:
             if self.controller.kind == 'watch':
                 self.controller.stop(); self.banner.set('시작한 변환과 저장을 마친 뒤 자동 동기화를 중지합니다.')
@@ -947,6 +983,7 @@ class Application:
         if self.settings_dialog:
             if not self.settings_dialog.close(force=session_end or self.controller.busy): return
         self.closing = True; self.startup = False; self.pending_offer = None; self.pending_results = []
+        if self.review_dialog:self.review_dialog.close()
         if self.resolution_view:
             self.resolution_view.destroy(); self.resolution_view = None
         self.controller.stop(); self.banner.set('진행 중인 작업을 마친 뒤 종료합니다.'); self.controls()
@@ -961,10 +998,12 @@ class Application:
                 kind, value = self.controller.events.get_nowait()
                 if kind == 'config':
                     from .sync_config import pair_key
-                    if self.config is None or pair_key(self.config) != pair_key(value): self.checked.clear()
+                    if self.config is None or pair_key(self.config) != pair_key(value):
+                        self.checked.clear();self.pending_reviews.clear();self.offered_reviews.clear()
                     self.config = value; self.update_config_summary()
                     if self.settings_dialog and self.settings_dialog.saving: self.settings_dialog.close(force=True)
                 elif kind == 'reset':
+                    self.pending_reviews.clear();self.offered_reviews.clear();self.resume_review_watch=False
                     self.config=None;self.checked.clear();self.pending_offer=None;self.pending_results=[]
                     self.run_keys.clear();self.last_sync=self.latest_success=None
                     if self.settings_dialog:self.settings_dialog.close(force=True)
@@ -977,6 +1016,8 @@ class Application:
                     if not self.closing: self.pending_offer = value
                 elif kind == 'results':
                     if not self.closing: self.pending_results.extend(value)
+                elif kind == 'image_review':
+                    if not self.closing:self.queue_image_review(value)
                 elif kind == 'diagnostics':
                     if not self.closing: self.diagnostics_dialog(value)
                 elif kind == 'log':
@@ -1007,6 +1048,8 @@ class Application:
             elif self.pending_results:
                 results, self.pending_results = self.pending_results, []
                 self.results_dialog(results)
+            elif self.pending_reviews:
+                self.open_image_review()
         if self.closing and not self.controller.busy:
             if self.tray: self.tray.close()
             self.controller.close(); self.window.destroy(); return

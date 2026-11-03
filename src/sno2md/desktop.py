@@ -44,6 +44,29 @@ class DesktopController:
                              result.get('message', ''), result.get('copy'))
         self.events.put(('results', results))
 
+    def offer_image_review(self, report):
+        # Decisions are carried in the published report; known keep/hide groups
+        # need no interruption. Tk consumes this event only after workers stop.
+        pending = [g['id'] for g in report['groups']
+                   if any(not o.get('rule') for o in g['occurrences'])]
+        if pending:self.events.put(('image_review', (report['document'], pending)))
+
+    def offer_saved_image_reviews(self, config, state):
+        from .image_review import ImageReviewStore, matched_rule
+        from .chunk_cache import note_id
+        from .sync_config import pair_key
+        if not config.get('review_images', True):return
+        identities = {note_id(pair_key(config)+'\0'+key) for key,e in state['notes'].items()
+                      if e.get('success') and e.get('sync_policy') != 'retired'}
+        store = ImageReviewStore(self.root/'image-review')
+        for doc in store.snapshot()['documents']:
+            if doc['id'] not in identities:continue
+            rules = store.rules(doc['id'])
+            pending = [g['id'] for g in doc['report']['groups']
+                       if any(matched_rule(p,g['role'],rules,config.get('repeat_distance',8)) is None
+                              for p in g['prototypes'])]
+            if pending:self.events.put(('image_review', (doc['id'], pending)))
+
     def launch(self, action, kind='settings'):
         if self.busy:
             raise Conflict('another desktop operation is running')
@@ -139,13 +162,16 @@ class DesktopController:
     def synchronize(self, watch=False, only_sources=None, restore_sources=None, restore_skipped=()):
         with store_lock(self.root):
             config, state = load_config(self.root), load_state(self.root)
-            engine = Synchronizer(self.root, config, state, emit=self.log, on_state=self.state)
+            engine = Synchronizer(self.root, config, state, emit=self.log, on_state=self.state,
+                                  on_review=self.offer_image_review)
             if restore_sources:
                 if watch or any(key not in state['notes'] or (not state['notes'][key].get('success') or state['notes'][key].get('sync_policy') == 'retired') for key in restore_sources):
                     raise ValueError('restore requires registered documents with successful output history')
                 engine.restore_targets.update(restore_sources)
                 only_sources = set(restore_sources)
             engine.inspect()
+            try:self.offer_saved_image_reviews(config, state)
+            except Exception as error:self.log(f'미검토 이미지 목록을 읽지 못했습니다: {error}')
             engine.run(watch=watch, stop_event=self.stop_event, only_sources=only_sources)
             engine.inspect()
             if restore_sources or only_sources is not None:

@@ -6,10 +6,11 @@ from .image_review import ImageReviewStore, ROLES, matched_rule
 
 
 class ImageReviewDialog:
-    def __init__(self,parent,root,distance=8,*,tab='groups'):
+    def __init__(self,parent,root,distance=8,*,tab='groups',app=None,documents=None,on_apply=None,on_close=None):
         import tkinter as tk
         from tkinter import ttk
-        self.tk,self.ttk=tk,ttk;self.parent=parent;self.app=parent.app
+        self.tk,self.ttk=tk,ttk;self.parent=parent;self.app=app if app is not None else parent.app
+        self.documents=documents;self.on_apply=on_apply;self.on_close=on_close;self.changed=False
         self.store=ImageReviewStore(root);self.distance=distance;self.closed=False
         self._preview_limit=120
         self.window=tk.Toplevel(parent.window);self.window.title('반복 이미지 검토')
@@ -44,7 +45,10 @@ class ImageReviewDialog:
         footer=ttk.Frame(self.window,padding=(12,0,12,12));footer.grid(row=1,column=0,sticky='ew');footer.columnconfigure(0,weight=1)
         self.message=tk.StringVar(self.window,value='결정은 즉시 저장되며 다음 동기화에서 적용됩니다. 보관한 원본 이미지는 유지합니다.')
         ttk.Label(footer,textvariable=self.message,wraplength=650).grid(row=0,column=0,sticky='ew')
-        ttk.Button(footer,text='닫기',command=self.close).grid(row=0,column=1,padx=(8,0))
+        if on_apply:
+            self.message.set('사진을 확인하고 그룹의 숨김 또는 보존을 선택한 뒤 결과에 적용하세요.')
+            ttk.Button(footer,text='결과에 적용',command=self.apply).grid(row=0,column=1,padx=(8,0))
+        ttk.Button(footer,text='닫기',command=self.close).grid(row=0,column=2,padx=(8,0))
         self.window.protocol('WM_DELETE_WINDOW',self.close)
         self.window.bind('<Configure>',self.resized,add=True)
         def wrap_labels(widget):
@@ -77,6 +81,8 @@ class ImageReviewDialog:
         try:self.data=self.store.snapshot()
         except Exception as error:
             self.message.set(f'검토 목록을 읽지 못했습니다: {error}');self.data=dict(documents=[],rules=[])
+        if self.documents is not None:
+            self.data['documents']=[d for d in self.data['documents'] if d['id'] in self.documents]
         self.document_box.configure(values=[display(d['title'] or '이름 없는 문서') for d in self.data['documents']])
         if self.data['documents']:
             self.document_box.current(next((i for i,d in enumerate(self.data['documents']) if d['id']==current),0))
@@ -99,6 +105,8 @@ class ImageReviewDialog:
             pages=', '.join(map(str,g['pages'][:8]))+('…' if len(g['pages'])>8 else '')
             self.groups.insert('','end',iid=g['id'],values=(g['label'],g['count'],pages,decision))
         if not report['groups']:self.group_preview.configure(text='반복 장식 후보가 없습니다. 본문 이미지에 대한 개별 승인은 필요하지 않습니다.')
+        else:
+            first=report['groups'][0]['id'];self.groups.selection_set(first);self.preview_group()
 
     def preview(self,label,sha,attribute):
         try:
@@ -139,8 +147,9 @@ class ImageReviewDialog:
         doc=self.current_document();selected=self.groups.selection()
         if not doc or not selected:self.message.set('검토할 그룹을 먼저 선택하세요.');return
         try:
-            for identity in selected:self.store.decision(doc['id'],identity,choice)
-            self.reload();self.message.set(f'{len(selected)}개 그룹의 결정을 저장했습니다. 다음 동기화에서 적용됩니다.')
+            for identity in selected:
+                self.store.decision(doc['id'],identity,choice);self.changed=True
+            self.reload();self.message.set(f'{len(selected)}개 그룹의 결정을 저장했습니다. '+('결과에 적용을 누르면 다시 변환합니다.' if self.on_apply else '다음 동기화에서 적용됩니다.'))
         except Exception as error:
             self.reload();self.message.set(f'결정 중 오류: {error}. 이미 저장된 결정은 목록에 표시됩니다.')
 
@@ -148,12 +157,20 @@ class ImageReviewDialog:
         if self.app.controller.busy or self.app.closing:return
         selected=self.library.selection()
         try:
-            for identity in selected:self.store.remove_rule(identity)
+            for identity in selected:
+                self.store.remove_rule(identity);self.changed=True
             self.reload();self.rule_preview.configure(image='',text='');self._rule_photo=None
             self.message.set('자동 숨김을 해제했습니다. 다음 동기화에서 이미지를 다시 표시합니다.')
         except Exception as error:self.message.set(str(error))
 
-    def close(self):
+    def apply(self):
+        if self.app.controller.busy or self.app.closing:return
+        if not self.changed:self.message.set('먼저 그룹의 숨김 또는 보존을 선택하세요.');return
+        callback=self.on_apply;self.close(notify=False)
+        callback()
+
+    def close(self,notify=True):
         if self.closed:return
         self.closed=True;self.window.grab_release();self.window.destroy();self.parent.review_dialog=None
-        if self.parent.window.winfo_exists() and not self.app.closing:self.parent.window.grab_set()
+        if self.parent is not self.app and self.parent.window.winfo_exists() and not self.app.closing:self.parent.window.grab_set()
+        if notify and self.on_close:self.on_close(self.changed)
