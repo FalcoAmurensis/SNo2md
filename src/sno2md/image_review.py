@@ -281,7 +281,7 @@ class ImageReview:
             for r in sorted(rows,key=lambda r:r['span']):
                 start,end=r['span']
                 if start<cursor or not 0<=start<end<=len(text):raise ValueError('overlapping review image spans')
-                chunks.extend((text[cursor:start],f'\n\n<!-- sno2md:hidden-image:{r["meta"]["sha"]} -->\n\n'));cursor=end
+                chunks.extend((text[cursor:start],'\n\n'));cursor=end
             chunks.append(text[cursor:]);changed[key]=''.join(chunks)
         report=dict(schema=1,document=self.document,title=note.title,source=str(self.source or note.source),
                     groups=candidates,hidden_count=len(hidden),body_preserved=preserved,objects=all_objects,

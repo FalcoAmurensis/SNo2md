@@ -6,7 +6,7 @@ from typing import Optional
 
 
 MARKDOWN_SCHEMA = 4
-GENERATOR_VERSION = 'md-11-appdata-page-metadata'
+GENERATOR_VERSION = 'md-12-image-review-output'
 
 
 class DecodeError(ValueError):
