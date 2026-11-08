@@ -25,7 +25,8 @@ def validate_config(root, config):
     require_separate(config['backup'], config['vault'], root)
     ConversionOptions(width_scale=config['width_scale'], image_storage=config.get('image_storage', 'external'),
                       document_folders=config.get('document_folders', True), review_images=config.get('review_images', True),
-                      repeat_distance=config.get('repeat_distance', 8))
+                      repeat_distance=config.get('repeat_distance', 8),
+                      markdown_mode=config.get('markdown_mode', 'classic'))
     duration(config['poll_seconds'])
     duration(config['settle_seconds'])
     worker_count(config.get('workers', 'auto'))
@@ -85,7 +86,8 @@ def change_paths(root, config, backup, vault):
 
 def new_config(root, backup, vault, *, width_scale=0.5, mode='auto', poll=5.0,
                settle=3.0, registry=None, workers='auto', wait_timeout=300.0,
-               image_storage='external', document_folders=True, review_images=True, repeat_distance=8):
+               image_storage='external', document_folders=True, review_images=True, repeat_distance=8,
+               markdown_mode='classic'):
     backup, vault = Path(backup).expanduser().resolve(), Path(vault).expanduser().resolve()
     if not backup.exists() or not vault.is_dir():
         raise ValueError('backup and selected Vault must already exist')
@@ -98,6 +100,7 @@ def new_config(root, backup, vault, *, width_scale=0.5, mode='auto', poll=5.0,
                                  'vault': str(vault), 'mode': mode, 'width_scale': width_scale,
                                  'image_storage': image_storage, 'document_folders': document_folders,
                                  'review_images': review_images, 'repeat_distance': repeat_distance,
+                                 'markdown_mode': markdown_mode,
                                  'poll_seconds': poll, 'settle_seconds': settle,
                                  'workers': worker_count(workers), 'wait_timeout': wait_timeout})
 

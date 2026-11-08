@@ -32,8 +32,12 @@ class ConversionOptions:
     document_folders: bool = True
     review_images: bool = True
     repeat_distance: int = 8
+    markdown_mode: str = 'classic'
 
     def __post_init__(self):
+        from .layout_renderer import MODES
+        if self.markdown_mode not in MODES:
+            raise ValueError('markdown_mode must be classic, auto, flow or canvas')
         if not math.isfinite(self.width_scale) or self.width_scale <= 0:
             raise ValueError('width_scale must be finite and positive')
         if self.image_storage not in {'external', 'embedded'}:
@@ -65,3 +69,4 @@ class ConversionResult:
     chunk_index: Optional[Path] = None
     image_assets: dict = field(default_factory=dict)
     image_review_report: Optional[dict] = None
+    layout_report: Optional[dict] = None

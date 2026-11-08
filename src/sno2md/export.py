@@ -39,6 +39,7 @@ def page_metadata(number, page, refs):
 def render_markdown(note, pdf_name, backgrounds, engine):
     if len(backgrounds) != len(note.pages):
         raise RenderError('Markdown note/background page count mismatch')
+    display_page = getattr(engine, 'display_page', engine.extract)
     md = [f'---\nsno2md_schema: {MARKDOWN_SCHEMA}\nmarkdown_engine: pymupdf-2.0\n'
           f'generator_version: {GENERATOR_VERSION}\n---\n',
           f'# {note.title.replace(chr(10), " ").replace(chr(13), " ") or "Samsung Notes"}\n']
@@ -51,7 +52,7 @@ def render_markdown(note, pdf_name, backgrounds, engine):
         # Keep every placement in metadata, but show that page once per note page.
         unique_sources = list({(s['asset'], s['source_pdf_page']): s for s in metadata['source_refs']}.values())
         for index, source in enumerate(unique_sources, 1):
-            text = engine.extract(source['asset'], source['source_pdf_page'] - 1)
+            text = display_page(source['asset'], source['source_pdf_page'] - 1)
             if any(line.startswith('<!-- sno2md:page-user:') for line in text.splitlines()):
                 raise RenderError('reserved Markdown page user marker in source text')
             if text.strip():

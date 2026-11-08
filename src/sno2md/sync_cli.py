@@ -11,6 +11,7 @@ from .worker import worker_count
 from .locations import (obsidian_registry, obsidian_vaults,
                         samsung_locations, state_directory)
 from .model import ConversionOptions
+from .layout_renderer import MODES
 from .sync_config import duration, load_config, load_state, new_config, create_config, update_config, change_paths
 from .sync import Synchronizer, default_name, discover, rebind_entry, rename_entry, registration
 from .catalog import read_catalog
@@ -39,6 +40,7 @@ def setup(root, args):
                         poll=args.poll, settle=args.settle, workers=args.workers, wait_timeout=args.wait_timeout,
                         image_storage=args.image_storage,
                         repeat_distance=args.repeat_distance, review_images=not args.no_image_review,
+                        markdown_mode=args.markdown_mode,
                         registry=args.obsidian_config or obsidian_registry(args.windows_profile))
     with store_lock(root):
         create_config(root, config)
@@ -66,6 +68,7 @@ def main(argv=None):
     setup_parser.add_argument('--wait-timeout', type=float, default=300.0)
     setup_parser.add_argument('--image-storage', choices=('external', 'embedded'), default='external')
     setup_parser.add_argument('--repeat-distance', type=int, default=8)
+    setup_parser.add_argument('--markdown-mode', choices=MODES, default='classic')
     setup_parser.add_argument('--no-image-review', action='store_true')
     commands.add_parser('scan', help='Read-only discovery of supported archives/note folders')
     commands.add_parser('status', help='Show registered notes and last known status')
@@ -99,6 +102,7 @@ def main(argv=None):
     settings.add_argument('--wait-timeout', type=float)
     settings.add_argument('--image-storage', choices=('external', 'embedded'))
     settings.add_argument('--repeat-distance', type=int)
+    settings.add_argument('--markdown-mode', choices=MODES)
     settings.add_argument('--image-review', choices=('on','off'))
     add = commands.add_parser('add', help='Register selected source keys in manual mode')
     add.add_argument('sources', nargs='*')
@@ -169,7 +173,7 @@ def main(argv=None):
                 for argument, key in (('mode','mode'), ('width_scale','width_scale'),
                                       ('poll','poll_seconds'), ('settle','settle_seconds'),
                                       ('workers','workers'), ('wait_timeout','wait_timeout'), ('image_storage','image_storage'),
-                                      ('repeat_distance','repeat_distance')):
+                                      ('repeat_distance','repeat_distance'), ('markdown_mode','markdown_mode')):
                     if getattr(args, argument) is not None: config[key] = getattr(args, argument)
                 ConversionOptions(width_scale=config['width_scale'])
                 if args.image_review is not None:config['review_images']=args.image_review=='on'

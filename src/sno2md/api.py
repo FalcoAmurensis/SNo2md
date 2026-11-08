@@ -46,7 +46,8 @@ def convert_pdf(source, destination, *, options=None):
         raise OutputError(f'PDF output failed: {error}') from error
 
 
-def export_note(source, vault_root, *, name=None, options=None, timings=None, chunk_cache=None, image_review=None):
+def export_note(source, vault_root, *, name=None, options=None, timings=None, chunk_cache=None,
+                image_review=None, layout_debug=False):
     """Decode once and export a portable PDF/MD/images document folder by default.
 
     Existing outputs are never replaced here. The sync layer manages replacement/recovery.
@@ -85,7 +86,10 @@ def export_note(source, vault_root, *, name=None, options=None, timings=None, ch
             output_stage = Path(output_tmp)
             counts = measured('pdf', write_pdf, note, output_stage/'output.pdf', options, backgrounds)
             started = time.perf_counter()
-            with SourceMarkdown(note) as engine:
+            layout_options = {}
+            if options.markdown_mode != 'classic' or layout_debug:
+                layout_options = dict(markdown_mode=options.markdown_mode, layout_debug=layout_debug)
+            with SourceMarkdown(note, **layout_options) as engine:
                 if options.review_images:
                     try:
                         if image_review is None:
@@ -101,6 +105,7 @@ def export_note(source, vault_root, *, name=None, options=None, timings=None, ch
                     except Exception as error:
                         chunk_warnings.append(f'Image review unavailable; images retained: {error}')
                 markdown = render_markdown(note, pdf_path.name, backgrounds, engine)
+                layout_report = engine.layout_report() if layout_debug else None
                 deferred = [dict(record, asset=asset, source_page=page+1)
                             for (asset, page), records in engine.object_reports.items()
                             for record in records if record['action'] == 'unresolved']
@@ -148,7 +153,8 @@ def export_note(source, vault_root, *, name=None, options=None, timings=None, ch
             except Exception as error:
                 warnings.append(f'Image review index unavailable: {error}')
         return ConversionResult(pdf=pdf_path, markdown=md_path, counts=counts, warnings=warnings,
-                                chunk_index=chunk_index, image_assets=image_assets, image_review_report=review_report)
+                                chunk_index=chunk_index, image_assets=image_assets, image_review_report=review_report,
+                                layout_report=layout_report)
     except Exception as error:
         failures = []
         for path, stamp in reversed(published):

@@ -60,7 +60,10 @@ def load_engine():
 
 
 class SourceMarkdown:
-    def __init__(self, note, object_policy='image'):
+    def __init__(self, note, object_policy='image', *, markdown_mode='classic', layout_debug=False):
+        from .layout_renderer import MODES
+        if markdown_mode not in MODES:
+            raise ValueError('unknown Markdown rendering mode')
         if object_policy not in {'image','native'}:
             raise ValueError('unknown source-object display policy')
         try:
@@ -71,6 +74,9 @@ class SourceMarkdown:
         self.documents, self.pages = {}, {}
         self.object_policy = object_policy
         self.object_renderers, self.object_reports = {}, {}
+        self.markdown_mode = markdown_mode
+        self.layout_debug = layout_debug
+        self.raw_pages, self.hidden_records, self.layout_pages = {}, {}, {}
 
     def __enter__(self):
         return self
@@ -82,6 +88,54 @@ class SourceMarkdown:
         self.pages.clear()
         self.object_renderers.clear()
         self.object_reports.clear()
+        self.raw_pages.clear()
+        self.hidden_records.clear()
+        self.layout_pages.clear()
+
+    def display_page(self, asset, page_index):
+        key = (asset, page_index)
+        classic = self.extract(*key)
+        if self.markdown_mode == 'classic' and not self.layout_debug:
+            return classic
+        if key not in self.layout_pages:
+            from .layout_classifier import classify_page
+            from .canvas_lines import canvas_line_plans
+            from .layout_ir import page_record
+            from .layout_renderer import render_page
+            from .visual_grouping import group_page
+
+            try:
+                pdf_page = self.documents[asset][page_index]
+                page = page_record(asset, page_index+1, pdf_page.rect, self.raw_pages.pop(key))
+                profile = classify_page(page)
+                groups = group_page(page, profile)
+                policy = profile['layout'] if self.markdown_mode == 'auto' else self.markdown_mode
+                line_plans = canvas_line_plans(page, self.pdf, pdf_page) if policy in {'canvas', 'mixed'} else None
+                result, audit = render_page(
+                    page, profile, groups, self.markdown_mode, classic,
+                    self.object_reports.get(key, ()), self.hidden_records.get(key, ()),
+                    line_plans,
+                )
+                report = dict(profile=profile, groups=groups, rendering=audit, bbox=page['bbox'],
+                              regions=[{k: v for k, v in r.items() if k != 'text'} for r in page['regions']],
+                              objects=self.object_reports.get(key, ()), hidden=self.hidden_records.get(key, ()))
+            except (KeyError, ValueError, TypeError, IndexError, ArithmeticError) as error:
+                result = classic
+                report = dict(profile=dict(page=page_index+1, layout='unknown', vote='unknown'),
+                              rendering=dict(policy='classic', fallback=f'invalid_layout: {error}'))
+            self.layout_pages[key] = result, report
+        return self.layout_pages[key][0]
+
+    def layout_report(self):
+        from .layout_classifier import document_profile
+        from .layout_renderer import VERSION
+
+        documents = []
+        for asset in sorted({asset for asset, _ in self.layout_pages}):
+            pages = [report for (name, _), (_, report) in sorted(self.layout_pages.items()) if name == asset]
+            profile = document_profile([p['profile'] for p in pages], len(self.documents[asset]))
+            documents.append(dict(asset=asset, profile=profile, pages=pages))
+        return dict(schema=1, renderer_version=VERSION, mode=self.markdown_mode, documents=documents)
 
     def extract(self, asset, page_index):
         key = (asset, page_index)
@@ -103,6 +157,8 @@ class SourceMarkdown:
                     chunks[0].get('metadata', {}).get('page_number') != page_index + 1):
                 raise ValueError('unexpected Markdown page result')
             text = chunks[0]['text']
+            if self.markdown_mode != 'classic' or self.layout_debug:
+                self.raw_pages[key] = chunks[0]
             if self.object_policy == 'image':
                 from .object_rendering import ObjectRenderer, render_page_objects
                 renderer = self.object_renderers.setdefault(asset, ObjectRenderer(document))

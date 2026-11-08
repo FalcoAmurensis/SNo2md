@@ -187,6 +187,10 @@ class Synchronizer:
         self.retry_after = {}
         self.options = {'width_scale': config['width_scale'], 'image_storage': config.get('image_storage', 'external')}
         self.options.update(review_images=config.get('review_images', True), repeat_distance=config.get('repeat_distance', 8))
+        markdown_mode = config.get('markdown_mode', 'classic')
+        if markdown_mode != 'classic':
+            from .layout_renderer import VERSION
+            self.options.update(markdown_mode=markdown_mode, layout_renderer=VERSION)
         self.metrics = {}
 
     def note_options(self,key):
@@ -396,7 +400,8 @@ class Synchronizer:
                                             self.config.get('image_storage', 'external'),
                                             self.state['notes'][key].get('document_folders', False),
                                             str(self.root/'image-review'),self.config.get('review_images', True),
-                                            self.config.get('repeat_distance', 8))
+                                            self.config.get('repeat_distance', 8),
+                                            self.config.get('markdown_mode', 'classic'))
                         future = pool.submit(convert_job, job)
                         pending[future] = (key, source, value, work)
                         self.status(key, 'converting')

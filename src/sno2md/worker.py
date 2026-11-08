@@ -49,6 +49,7 @@ class ConversionJob:
     review_root: str = None
     review_images: bool = True
     repeat_distance: int = 8
+    markdown_mode: str = 'classic'
 
 
 def convert_job(job):
@@ -63,7 +64,8 @@ def convert_job(job):
         result = export_note(Path(job.snapshot), Path(job.output), name=job.name,
                              options=ConversionOptions(width_scale=job.width_scale, image_storage=job.image_storage,
                                                        document_folders=job.document_folders, review_images=job.review_images,
-                                                       repeat_distance=job.repeat_distance), timings=stages,
+                                                       repeat_distance=job.repeat_distance,
+                                                       markdown_mode=job.markdown_mode), timings=stages,
                              image_review=ImageReview(job.review_root or Path(job.output).parent/'image-review',
                                  job.chunk_identity or job.name, distance=job.repeat_distance, defer=True,
                                  source=job.chunk_origin or job.snapshot),

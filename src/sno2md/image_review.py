@@ -276,11 +276,15 @@ class ImageReview:
         replacements={}
         for r in hidden:replacements.setdefault((r['asset'],r['page']-1),[]).append(r)
         changed={}
+        hidden_records={}
         for key,rows in replacements.items():
-            text=originals[key];chunks=[];cursor=0
+            text=originals[key];chunks=[];cursor=0;delta=0
             for r in sorted(rows,key=lambda r:r['span']):
                 start,end=r['span']
                 if start<cursor or not 0<=start<end<=len(text):raise ValueError('overlapping review image spans')
+                hidden_records.setdefault(key, []).append(dict(span=[start, end],
+                                                               output_span=[start+delta, start+delta+2]))
+                delta += 2 - (end-start)
                 chunks.extend((text[cursor:start],'\n\n'));cursor=end
             chunks.append(text[cursor:]);changed[key]=''.join(chunks)
         report=dict(schema=1,document=self.document,title=note.title,source=str(self.source or note.source),
@@ -288,4 +292,6 @@ class ImageReview:
                     threshold=self.distance,algorithm=ALGORITHM,policy_revision=revision,
                     seconds=time.perf_counter()-started)
         engine.pages.update(changed)
+        if hasattr(engine, 'hidden_records'):
+            engine.hidden_records.update(hidden_records)
         return report
